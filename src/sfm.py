@@ -41,14 +41,14 @@ class Pose:
         self.t = t
 
     def inverse(self) -> Pose:
-        """Inverse the pose in SE(3).
+        """Inverse the pose in SE(3)
 
         :return: the inversed pose.
         """
         return Pose(self.R.T, -self.R.T @ self.t)
 
     def transform(self, P: Tensor) -> Tensor:
-        """Transforms points in the pose frame.
+        """Transforms points in the pose frame
 
         :param P: points to transform, shape (3, n).
         :return: transformed points, shape (3, n).
@@ -81,31 +81,23 @@ class Camera:
 
 
 class SfMImage:
-    def __init__(self, image_id: int, path: Path, pose: Pose, camera: Camera, colmap_model: COLMAPModel):
+    def __init__(self, image_id: int, image_path: Path, pose: Pose, camera: Camera, colmap_model: COLMAPModel):
         """Image object
 
         :param image_id: image id in COLMAP databse.
-        :param path: path to the image.
+        :param image_path: path to the image.
         :param pose: pose object of the image.
         :param camera: camera object of the image.
         :param colmap_model: COLMAP model object.
         """
         self.id = image_id
-        self.name = path.name
-        self.path = path
-        self.depth_path = path.parents[1] / 'depth_maps' / f'depth_{path.with_suffix(".png").name}'
+        self.name = image_path.name
+        self.image_path = image_path
+        self.depth_path = image_path.parents[1] / 'depth_maps' / f'depth_{image_path.with_suffix(".png").name}'
         self.pose = pose
         self.camera = camera
         self.colmap_model = colmap_model
         self.voxel_list = []
-
-    def image(self) -> Tensor:
-        """Returns the image normalized between 0 and 1."""
-        return torch.tensor(cv2.cvtColor(cv2.imread(str(self.path)), cv2.COLOR_BGR2RGB)) / 255
-
-    def depth_map(self) -> Tensor:
-        """Returns the depth map in meters, assuming the depth is specified in mm in the depth file."""
-        return torch.tensor(np.int32(cv2.imread(str(self.depth_path), cv2.IMREAD_UNCHANGED))) / 1000
 
     def unproject_depth_map(self, depth_map: Tensor, transform: bool = True) -> tuple[Tensor, Tensor, Tensor]:
         """Unprojects the depth map of the image in 3D world
@@ -148,7 +140,7 @@ class SfMImage:
         """Projects 3D points in the image view
 
         :param wP: 3D points in the world frame, shape (3, n).
-        :return: pixels coordinates of the 3D points, shape (2, n)
+        :return: pixels coordinates of the 3D points, shape (2, n).
         """
         cP = self.pose.inverse().transform(wP)
         cp = self.camera.K.to(cP.device) @ cP
@@ -156,7 +148,7 @@ class SfMImage:
         return px
 
     def match_brut(self, other: SfMImage, u1: Tensor, v1: Tensor, wP1: Tensor) -> Tensor:
-        """Pair pixels coordinates with another view.
+        """Pair pixels coordinates with another view
 
         :param other: other image with which to pair pixels.
         :param u1: u pixels coordinates to pair.
@@ -194,7 +186,7 @@ class SfMImage:
 
     def compute_matches(self, image_list: list[SfMImage], min_cover: float = 0.01, num_workers: int = 0,
                         device: str = 'cpu') -> tuple[list[Matches], Tensor]:
-        """Computes all pairs between this image and all images in the image list.
+        """Computes all pairs between this image and all images in the image list
 
         :param image_list: list of images to pair.
         :param min_cover: minimum cover in percentile to keep the matches
