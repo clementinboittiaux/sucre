@@ -27,7 +27,7 @@ from PIL import Image, ImageDraw
 from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
 
-from thirdparty.read_write_model import read_cameras_binary, read_images_binary
+from colmap.scripts.python.read_write_model import read_cameras_binary, read_images_binary
 
 
 class Pose:
