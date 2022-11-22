@@ -15,17 +15,42 @@
 #
 # Author: Clementin Boittiaux <boittiauxclementin at gmail dot com>
 
+from __future__ import annotations
+
 import cv2
 import torch
 import numpy as np
 from pathlib import Path
 from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
-from sfm import SfMImage
+from colmap.scripts.python import read_write_model
+import sfm
+
+
+def load_cameras(model_dir: Path) -> dict[int, read_write_model.Camera]:
+    cameras_bin = model_dir / 'cameras.bin'
+    cameras_txt = model_dir / 'cameras.txt'
+    if cameras_bin.exists():
+        return read_write_model.read_cameras_binary(cameras_bin)
+    elif cameras_txt.exists():
+        return read_write_model.read_cameras_text(cameras_txt)
+    else:
+        raise FileExistsError(f'No cameras file found in {model_dir}.')
+
+
+def load_images(model_dir: Path) -> dict[int, read_write_model.Image]:
+    images_bin = model_dir / 'images.bin'
+    images_txt = model_dir / 'images.txt'
+    if images_bin.exists():
+        return read_write_model.read_images_binary(images_bin)
+    elif images_txt.exists():
+        return read_write_model.read_images_text(images_txt)
+    else:
+        raise FileExistsError(f'No cameras file found in {model_dir}.')
 
 
 class ImageDataset(Dataset):
-    def __init__(self, image_list: list[SfMImage], return_image: bool = True, return_depth: bool = True):
+    def __init__(self, image_list: list[sfm.Image], return_image: bool = True, return_depth: bool = True):
         self.images = image_list
         self.return_image = return_image
         self.return_depth = return_depth
@@ -33,14 +58,14 @@ class ImageDataset(Dataset):
     def __len__(self) -> int:
         return len(self.images)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> tuple[int, Tensor] | tuple[int, Tensor, Tensor]:
         image = self.images[idx]
         if self.return_image and not self.return_depth:
-            return image.name, load_image(image.image_path)
+            return idx, load_image(image.image_path)
         elif self.return_depth and not self.return_image:
-            return image.name, load_depth(image.depth_path)
+            return idx, load_depth(image.depth_path)
         elif self.return_image and self.return_depth:
-            return image.name, load_image(image.image_path), load_depth(image.depth_path)
+            return idx, load_image(image.image_path), load_depth(image.depth_path)
 
 
 def load_image(image_path: Path) -> Tensor:
@@ -58,16 +83,11 @@ def load_depth(depth_path: Path) -> Tensor:
                              f'Only PNG, TIF and TIFF are supported.')
 
 
-def image_loader(
-        image_list: list[SfMImage],
+def loader(
+        image_list: list[sfm.Image],
         return_image: bool = True,
         return_depth: bool = True,
-        num_workers: int = 0,
-        device: str = 'cpu'
-):
-    pin_memory = False if device.lower() == 'cpu' else True
-    pin_memory_device = device if pin_memory else ''
+        num_workers: int = 0
+) -> DataLoader:
     dataset = ImageDataset(image_list, return_image=return_image, return_depth=return_depth)
-    loader = DataLoader(dataset, num_workers=num_workers, collate_fn=lambda x: x[0], pin_memory=pin_memory,
-                        pin_memory_device=pin_memory_device)
-    return loader
+    return DataLoader(dataset, num_workers=num_workers, collate_fn=lambda x: x[0])
