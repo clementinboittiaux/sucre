@@ -72,10 +72,6 @@ class SUCReModel(torch.nn.Module):
         return J_plot
 
 
-def build_data(image_list: list[Image], matches_path: Path, channel: int, num_workers: int = 0, device: str = 'cpu'):
-    Ic, z, u, v = [], [], [], []
-
-
 def optimization(
         image: Image,
         image_list: list[Image],

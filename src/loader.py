@@ -161,3 +161,22 @@ def load_data(
             Ig = torch.tensor(f['Ig'][cursor:cursor + chunk_size], device=device)
             Ib = torch.tensor(f['Ib'][cursor:cursor + chunk_size], device=device)
             yield u, v, z, Ir, Ig, Ib
+
+
+def load_data_single_channel(
+        data_path: Path,
+        channel: int,
+        chunk_size: int = 2**20,
+        device: str = 'cpu'
+) -> tuple[Tensor, Tensor]:
+    with h5py.File(data_path, 'r', libver='latest') as f:
+        for cursor in range(0, len(f['u']), chunk_size):
+            z = torch.tensor(f['z'][cursor:cursor + chunk_size], device=device)
+            match channel:
+                case 0:
+                    Ic = torch.tensor(f['Ir'][cursor:cursor + chunk_size], device=device)
+                case 1:
+                    Ic = torch.tensor(f['Ig'][cursor:cursor + chunk_size], device=device)
+                case 2:
+                    Ic = torch.tensor(f['Ib'][cursor:cursor + chunk_size], device=device)
+            yield z, Ic
