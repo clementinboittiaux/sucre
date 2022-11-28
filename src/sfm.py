@@ -19,12 +19,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import h5py
 import numpy as np
 import torch
 import tqdm
-import PIL
+from PIL import Image as PILImage, ImageDraw
 from torch import Tensor
 import loader
+import dumper
 
 
 class Pose:
@@ -120,29 +122,20 @@ class Image:
         matches2 = other.match_one_way(self, u1=u2, v1=v2, wP1=wP2)
         return matches1 & matches2
 
-    def match_images(self, image_list: list[Image], min_cover: float = 0.01, num_workers: int = 0,
-                        device: str = 'cpu') -> tuple[list[Matches], Tensor]:
+    def match_images(self, image_list: list[Image], matches_path: Path, min_cover: float = 0.01,
+                     num_workers: int = 0, device: str = 'cpu') -> list[Image]:
+        matched_images = []
         u1, v1, wP1 = self.unproject_depth_map(loader.load_depth(self.depth_path).to(device))
-        matches_dict = {}
-        for other_idx, other_depth_map in tqdm.tqdm(
-                loader.loader(image_list, return_image=False, num_workers=num_workers)
-        ):
-            other = image_list[other_idx]
-            other_depth_map = other_depth_map.to(device)
-            u2, v2, wP2 = other.unproject_depth_map(other_depth_map)
-            other_matches = self.match_dense(other, u1=u1, v1=v1, wP1=wP1, u2=u2, v2=v2, wP2=wP2)
-            if len(other_matches) / (self.camera.width * self.camera.height) > min_cover:
-                count[other_matches.v1, other_matches.u1] += 1
-                other_distance_map = other.distance_map(other_depth_map)
-                other_matches.z = other_distance_map[other_matches.v2, other_matches.u2]
-                other_matches.to('cpu')
-                matches_dict[other] = other_matches
-        image_dataset = ImageDataset(list(matches_dict), load_image=True)
-        image_loader = DataLoader(image_dataset, num_workers=num_workers, collate_fn=lambda x: x[0])
-        for other_name, other_image in tqdm.tqdm(image_loader):
-            other_matches = matches_dict[self.colmap_model[other_name]]
-            other_matches.I = other_image.to(device)[other_matches.v2.to(device), other_matches.u2.to(device)].cpu()
-        return list(matches_dict.values()), count
+        with h5py.File(matches_path, 'w', libver='latest') as f:
+            for other_idx, other_depth_map in tqdm.tqdm(
+                    loader.loader(image_list, return_image=False, num_workers=num_workers)):
+                other = image_list[other_idx]
+                u2, v2, wP2 = other.unproject_depth_map(other_depth_map.to(device))
+                other_matches = self.match_two_way(other, u1=u1, v1=v1, wP1=wP1, u2=u2, v2=v2, wP2=wP2)
+                if len(other_matches) / (self.camera.width * self.camera.height) > min_cover:
+                    matched_images.append(other)
+                    dumper.save_matches(stream=f, matches=other_matches)
+        return matched_images
 
     def __repr__(self) -> str:
         """String representation"""
@@ -168,17 +161,11 @@ class Matches:
         match_map[self.v1, self.u1, 1] = self.u2
         return match_map
 
-    def to(self, device: str):
-        self.u1 = self.u1.to(device)
-        self.v1 = self.v1.to(device)
-        self.u2 = self.u2.to(device)
-        self.v2 = self.v2.to(device)
-
     def plot(self, step: int = 10000, color: tuple[float, float, float] = None) -> Image:
         image1 = loader.load_image(self.image1.image_path)
         image2 = loader.load_image(self.image2.image_path)
-        imatch = PIL.Image.fromarray(np.uint8(torch.concat([image1, image2], dim=1) * 255))
-        draw = PIL.ImageDraw.Draw(imatch)
+        imatch = PILImage.fromarray(np.uint8(torch.concat([image1, image2], dim=1) * 255))
+        draw = ImageDraw.Draw(imatch)
         for u1, v1, u2, v2 in zip(self.u1[::step], self.v1[::step], self.u2[::step], self.v2[::step]):
             fill = tuple(np.random.randint(0, 256, 3)) if color is None else color
             draw.line([(u1, v1), (u2 + image1.shape[1], v2)], fill=fill, width=3)
@@ -195,7 +182,6 @@ class Matches:
             u2=self.u2[args],
             v2=self.v2[args]
         )
-
 
     def __len__(self) -> int:
         """Returns the number of matches"""
