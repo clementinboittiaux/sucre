@@ -72,42 +72,6 @@ class MatchesFile:
                 ))
         return data
 
-    def load_all(self) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        u = torch.full((len(self),), -1, dtype=torch.int16)
-        v = torch.full((len(self),), -1, dtype=torch.int16)
-        z = torch.full((len(self),), torch.nan, dtype=torch.float32)
-        I = torch.full((len(self), 3), torch.nan, dtype=torch.float32)
-        cursor = 0
-        with h5py.File(self.path, 'r', libver='latest') as f:
-            for image in self.images:
-                dataset = f[image.name]
-                u_dataset = torch.tensor(dataset['u1'][()])
-                v_dataset = torch.tensor(dataset['v1'][()])
-                z_dataset = torch.tensor(dataset['z'][()])
-                I_dataset = torch.tensor(dataset['I'][()])
-                length = z_dataset.shape[0]
-                u[cursor: cursor + length] = u_dataset
-                v[cursor: cursor + length] = v_dataset
-                z[cursor: cursor + length] = z_dataset
-                I[cursor: cursor + length] = I_dataset.T
-                cursor += length
-        return u.long(), v.long(), z, I
-
-    def load_Ic_z(self, channel: int, device: str = 'cpu') -> tuple[Tensor, Tensor]:
-        Ic = torch.full((len(self),), torch.nan, dtype=torch.float32)
-        z = torch.full((len(self),), torch.nan, dtype=torch.float32)
-        cursor = 0
-        with h5py.File(self.path, 'r', libver='latest') as f:
-            for image in self.images:
-                dataset = f[image.name]
-                z_dataset = torch.tensor(dataset['z'][()])
-                Ic_dataset = torch.tensor(dataset['I'][channel])
-                length = z_dataset.shape[0]
-                z[cursor: cursor + length] = z_dataset
-                Ic[cursor: cursor + length] = Ic_dataset
-                cursor += length
-        return Ic.to(device), z.to(device)
-
     def __len__(self):
         return self.size
 

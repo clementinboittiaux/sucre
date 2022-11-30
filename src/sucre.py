@@ -18,18 +18,17 @@
 from __future__ import annotations
 
 import argparse
-import datetime
 from pathlib import Path
 
 import numpy as np
 import torch
-import tqdm
 import loader
 import yaml
 from PIL import Image
 from torch import Tensor
-from torch.utils.tensorboard import SummaryWriter
 import gaussian_seathru
+import normalization
+from scipy.optimize import minimize
 import sfm
 
 
@@ -41,77 +40,81 @@ def initialize_sucre_parameters(image: sfm.Image, channel: int, device: str = 'c
     return B, beta, gamma
 
 
-class SUCReModel(torch.nn.Module):
-    def __init__(self, image: sfm.Image, B: list[float, float, float], beta, gamma):
-        """SUCRe model
-
-        :param image: image to restore.
-        """
-        super().__init__()
-        self.J = torch.nn.Parameter(loader.load_image(image.image_path))
-        self.B = torch.nn.Parameter(torch.tensor(B, dtype=torch.float32))
-        self.beta = torch.nn.Parameter(torch.tensor(beta, dtype=torch.float32))
-        self.gamma = torch.nn.Parameter(torch.tensor(gamma, dtype=torch.float32))
-        self.args_valid = loader.load_depth(image.depth_path) > 0
-
-    def forward(self, u: Tensor, v: Tensor, z: Tensor) -> Tensor:
-        """Compute the underwater image formation model
-
-        :param u: u pixels coordinates for J.
-        :param v: v pixels coordinates for J.
-        :param z: pixels distances.
-        :return: the image at coordinates (u, v), as seen at distances z,
-        given the current image formation model parameters.
-        """
-        z = z.unsqueeze(dim=1).repeat(1, 3)
-        return self.J[v, u] * torch.exp(-self.beta * z) + self.B * (1 - torch.exp(-self.gamma * z))
-
-    def restore(self) -> np.array:
-        """Normalize J (histogram stretching)
-
-        :return: normalized J
-        """
-        J = self.J.detach().cpu().numpy()
-        args_valid = self.args_valid.cpu().numpy()
-        J_valid = J[args_valid]
-        J_valid = np.clip(J_valid, np.percentile(J_valid, 1, axis=0), np.percentile(J_valid, 99, axis=0))
-        J_valid = J_valid - J_valid.min(axis=0)
-        J_valid = J_valid / J_valid.max(axis=0)
-        J_plot = np.zeros_like(J)
-        J_plot[args_valid] = J_valid
-        return J_plot
+def iter_data(data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
+              device: str = 'cpu') -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    for u, v, z, Ic in data:
+        yield u.to(device).long(), v.to(device).long(), z.to(device), Ic.to(device)
 
 
-def optimize(image: sfm.Image, channel: int, matches_file: loader.MatchesFile, device: str = 'cpu'):
-    print('Initialize parameters with Gaussian Sea-thru.')
-    B, beta, gamma = initialize_sucre_parameters(image, channel=channel, device=device)
-    print(f'B: {B}\nbeta: {beta}\ngamma: {gamma}')
-
-    beta = torch.tensor(beta, dtype=torch.float32, device=device)
-    gamma = torch.tensor(gamma, dtype=torch.float32, device=device)
-
-    data = matches_file.load_channel(channel)
-
-    sum_Ii_betai = torch.zeros(image.camera.height, image.camera.height, device=device)
+def compute_B_and_J(
+        image: sfm.Image,
+        data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
+        beta: float,
+        gamma: float,
+        device: str = 'cpu'
+) -> tuple[Tensor, Tensor]:
+    sum_Ii_betai = torch.zeros(image.camera.height, image.camera.width, device=device)
     sum_bi_betai = torch.zeros_like(sum_Ii_betai)
     sum_betai2 = torch.zeros_like(sum_Ii_betai)
-    for ui, vi, zi, Ii in data:
-        ui, vi = ui.long(), vi.long()
-        zi, Ii = zi.to(device), Ii.to(device)
+    sum_mi_ni = torch.zeros_like(sum_Ii_betai)
+    sum_ni2 = torch.zeros_like(sum_Ii_betai)
+
+    for ui, vi, zi, Ii in iter_data(data, device=device):
         betai = torch.exp(-beta * zi)
         bi = 1 - torch.exp(-gamma * zi)
         sum_Ii_betai[vi, ui] += Ii * betai
         sum_bi_betai[vi, ui] += bi * betai
         sum_betai2[vi, ui] += torch.square(betai)
+
     A = sum_Ii_betai / sum_betai2
     D = sum_bi_betai / sum_betai2
 
+    for ui, vi, zi, Ii in iter_data(data, device=device):
+        betai = torch.exp(-beta * zi)
+        bi = 1 - torch.exp(-gamma * zi)
+        mi = A[vi, ui] * betai - Ii
+        ni = D[vi, ui] * betai - bi
+        sum_mi_ni[vi, ui] += mi * ni
+        sum_ni2[vi, ui] += torch.square(ni)
 
-    print('super')
+    B = sum_mi_ni.sum() / sum_ni2.sum()
+    J = A - B * D
+    return B, J
 
 
+def solve_sucre(image: sfm.Image, channel: int, matches_file: loader.MatchesFile, device: str = 'cpu'):
+    print('Initialize parameters with Gaussian Sea-thru.')
+    Bc_init, betac_init, gammac_init = initialize_sucre_parameters(image, channel=channel, device=device)
+    print(f'B: {Bc_init}\nbeta: {betac_init}\ngamma: {gammac_init}')
 
+    data = matches_file.load_channel(channel)
 
+    def residuals(x):
+        betac_hat, gammac_hat = x.tolist()
+        Bc_hat, Jc_hat = compute_B_and_J(image=image, data=data, beta=betac_hat, gamma=gammac_hat, device=device)
+        res = torch.zeros(image.camera.height, image.camera.width, device=device)
+        for ui, vi, zi, Ii in iter_data(data, device=device):
+            res[vi, ui] += torch.square(
+                Ii - Jc_hat[vi, ui] * torch.exp(-betac_hat * zi) - Bc_hat * (1 - torch.exp(-gammac_hat * zi))
+            )
+        res = (res / len(matches_file)).sum()
+        return res.item()
+
+    print('Start SUCRe optimization.')
+    parameters = minimize(
+        residuals,
+        np.array([betac_init, gammac_init]),
+        method='Nelder-Mead',
+        bounds=[(0, np.inf), (0, np.inf)],
+        options={'maxiter': 10000, 'disp': True}
+    )
+
+    betac, gammac = parameters.x.tolist()
+    Bc, Jc = compute_B_and_J(image=image, data=data, beta=betac, gamma=gammac, device=device)
+
+    print(f'B: {Bc}\nbeta: {betac}\ngamma: {gammac}')
+
+    return Jc.cpu(), Bc.item(), betac, gammac
 
 
 def sucre(
@@ -143,84 +146,17 @@ def sucre(
     print('Prepare matches for optimization.')
     matches_file.prepare_matches(num_workers=num_workers, device=device)
 
-    B, beta, gamma = [], [], []
+    J = torch.full((image.camera.height, image.camera.width, 3), torch.nan, dtype=torch.float32)
     for channel in range(3):
         print(f'SUCRe optimization on {["red", "green", "blue"][channel]} channel.')
-        optimize(image=image, channel=channel, matches_file=matches_file, device=device)
-        # Bc, betac, gammac = initialize_sucre_parameters(image, channel=channel, device=device)
-        # B.append(Bc)
-        # beta.append(betac)
-        # gamma.append(gammac)
+        J[:, :, channel], Bc, betac, gammac = solve_sucre(
+            image=image, channel=channel, matches_file=matches_file, device=device
+        )
 
-    raise Exception
-
-    # Initialize SUCRe's model parameters
-    print(f'Restoring {image_name}.')
-    model = SUCReModel(image, B, beta, gamma)
-    model.to(device)
-
-    # Setup Adam optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.05)
-
-    # Setup logger
-    writer = SummaryWriter(str(output_dir / datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')))
-
-    # Setup data
-    u, v, z, I = matches_file.load_all()
-
-    epochs = 150
-    split_size = 2097152
-    epoch_losses = []
-
-    for epoch in tqdm.tqdm(range(epochs)):  # For each optimization step
-
-        epoch_loss = 0
-        optimizer.zero_grad()  # Set the gradient to 0
-
-        for u_split, v_split, I_split, z_split in zip(u.split(split_size), v.split(split_size), I.split(split_size),
-                                                      z.split(split_size)):  # For each data sample
-            # Switch to correct device
-            u_split = u_split.to(device)
-            v_split = v_split.to(device)
-            I_split = I_split.to(device)
-            z_split = z_split.to(device)
-
-            # Compute the negative log likelihood of observing the acquired image
-            I_hat = model(u_split, v_split, z_split)
-            loss = torch.square(I_split - I_hat).sum()
-
-            # Compute gradient
-            loss.backward()
-            epoch_loss += loss.item()
-
-        # Apply gradient
-        optimizer.step()
-
-        # Log results
-        epoch_losses.append(epoch_loss)
-        writer.add_scalar('loss', epoch_loss, epoch)
-        writer.flush()
-
-    writer.close()
-
-    # Save J without any normalization
-    np.savez(
-        str((output_dir / image_name).with_suffix('.npz')),
-        J=model.J.detach().cpu().numpy(),
-        args_valid=model.args_valid.cpu().numpy()
-    )
-
-    # Normalize and then save J as an image
-    Image.fromarray(np.uint8(model.restore() * 255)).save((output_dir / image_name).with_suffix('.png'))
-
-    # Save estimated underwater image formation model parameters
-    sucre_params_path = (output_dir / image_name).with_suffix('.yml')
-    with open(sucre_params_path, 'w') as sucre_params:
-        yaml.dump({
-            'beta': model.beta.detach().cpu().numpy().tolist(),
-            'B': model.B.detach().cpu().numpy().tolist(),
-            'gamma': model.gamma.detach().cpu().numpy().tolist()
-        }, sucre_params)
+    print('Save restored image.')
+    Image.fromarray(
+        np.uint8(normalization.histogram_stretching(J) * 255)
+    ).save((output_dir / image_name).with_suffix('.png'))
 
 
 def parse_args(args: argparse.Namespace):
