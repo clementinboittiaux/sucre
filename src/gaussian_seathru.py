@@ -88,6 +88,36 @@ def compute_J(I: Tensor, z: Tensor, B: float, beta: float | Tensor, gamma: float
     return (I - B * (1 - torch.exp(-gamma * z))) * torch.exp(beta * z)
 
 
+def solve_linear(Ic: Tensor, z: Tensor) -> np.array:
+    def residuals(x):
+        Bc_hat, betac_hat, gammac_hat = x.tolist()
+
+        # Compute Jc from estimated parameters
+        Jc_hat = compute_J(Ic, z, Bc_hat, betac_hat, gammac_hat)
+
+        # Compute mu and sigma from the estimation of Jc
+        muc_hat = Jc_hat.mean()
+        sigmac_hat = Jc_hat.std()
+
+        # Compute m and s from all previously estimated parameters
+        mc_hat = compute_m(z, Bc_hat, betac_hat, gammac_hat, muc_hat)
+        sc_hat = compute_s(z, betac_hat, sigmac_hat)
+
+        return compute_loss(Ic, mc_hat, sc_hat).item()
+
+    parameters_init = [0.25, 0.1, 0.1]
+
+    # Minimize the negative log likelihood using simplex algorithm
+    parameters = minimize(
+        residuals,
+        np.array(parameters_init),
+        method='Nelder-Mead',
+        bounds=[(0, np.inf)] * len(parameters_init),
+        options={'maxiter': 10000, 'disp': True}
+    )
+    return parameters.x
+
+
 def solve_normal(Ic: Tensor, z: Tensor, linear_beta: bool = False) -> dict:
     """Solve the minimization problem with simplex algorithm
 

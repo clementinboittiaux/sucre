@@ -17,18 +17,9 @@
 
 from __future__ import annotations
 
-import cv2
-import torch
 import numpy as np
-from pathlib import Path
-from torch import Tensor
-from torch.utils.data import Dataset, DataLoader
-from colmap.scripts.python import read_write_model
 import sfm
 import h5py
-
-
-
 
 
 def save_matches(stream: h5py.File, matches: sfm.Matches):
@@ -37,3 +28,5 @@ def save_matches(stream: h5py.File, matches: sfm.Matches):
     group.create_dataset('v1', data=matches.v1.short().cpu().numpy())
     group.create_dataset('u2', data=matches.u2.short().cpu().numpy())
     group.create_dataset('v2', data=matches.v2.short().cpu().numpy())
+    group.create_dataset('z', data=np.full(len(matches), np.nan, dtype=np.float32))
+    group.create_dataset('I', data=np.full((3, len(matches)), np.nan, dtype=np.float32))

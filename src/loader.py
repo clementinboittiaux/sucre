@@ -29,6 +29,89 @@ import tqdm
 import h5py
 
 
+class MatchesFile:
+    def __init__(self, path: Path):
+        path.unlink(missing_ok=True)
+        self.path = path
+        self.size: int = 0
+        self.images: list[sfm.Image] = []
+
+    def save_matches(self, matches: sfm.Matches):
+        with h5py.File(self.path, 'a', libver='latest') as f:
+            group = f.create_group(matches.image2.name)
+            group.create_dataset('u1', data=matches.u1.short().cpu().numpy())
+            group.create_dataset('v1', data=matches.v1.short().cpu().numpy())
+            group.create_dataset('u2', data=matches.u2.short().cpu().numpy())
+            group.create_dataset('v2', data=matches.v2.short().cpu().numpy())
+            group.create_dataset('z', data=np.full(len(matches), np.nan, dtype=np.float32))
+            group.create_dataset('I', data=np.full((3, len(matches)), np.nan, dtype=np.float32))
+        self.size += len(matches)
+        self.images.append(matches.image2)
+
+    def prepare_matches(self, num_workers: int = 0, device: str = 'cpu'):
+        with h5py.File(self.path, 'r+', libver='latest') as f:
+            for image_idx, image_image, image_depth in tqdm.tqdm(load_images(self.images, num_workers=num_workers)):
+                image = self.images[image_idx]
+                image_distance = image.distance_map(image_depth.to(device))
+                dataset = f[image.name]
+                u2 = torch.tensor(dataset['u2'][()], dtype=torch.int64)
+                v2 = torch.tensor(dataset['v2'][()], dtype=torch.int64)
+                dataset['z'][()] = image_distance[v2, u2].cpu().numpy()
+                dataset['I'][()] = image_image[v2, u2].T.numpy()
+
+    def load_channel(self, channel: int) -> list[tuple[Tensor, Tensor, Tensor, Tensor]]:
+        data = []
+        with h5py.File(self.path, 'r', libver='latest') as f:
+            for image in self.images:
+                dataset = f[image.name]
+                data.append((
+                    torch.tensor(dataset['u1'][()]),
+                    torch.tensor(dataset['v1'][()]),
+                    torch.tensor(dataset['z'][()]),
+                    torch.tensor(dataset['I'][channel])
+                ))
+        return data
+
+    def load_all(self) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        u = torch.full((len(self),), -1, dtype=torch.int16)
+        v = torch.full((len(self),), -1, dtype=torch.int16)
+        z = torch.full((len(self),), torch.nan, dtype=torch.float32)
+        I = torch.full((len(self), 3), torch.nan, dtype=torch.float32)
+        cursor = 0
+        with h5py.File(self.path, 'r', libver='latest') as f:
+            for image in self.images:
+                dataset = f[image.name]
+                u_dataset = torch.tensor(dataset['u1'][()])
+                v_dataset = torch.tensor(dataset['v1'][()])
+                z_dataset = torch.tensor(dataset['z'][()])
+                I_dataset = torch.tensor(dataset['I'][()])
+                length = z_dataset.shape[0]
+                u[cursor: cursor + length] = u_dataset
+                v[cursor: cursor + length] = v_dataset
+                z[cursor: cursor + length] = z_dataset
+                I[cursor: cursor + length] = I_dataset.T
+                cursor += length
+        return u.long(), v.long(), z, I
+
+    def load_Ic_z(self, channel: int, device: str = 'cpu') -> tuple[Tensor, Tensor]:
+        Ic = torch.full((len(self),), torch.nan, dtype=torch.float32)
+        z = torch.full((len(self),), torch.nan, dtype=torch.float32)
+        cursor = 0
+        with h5py.File(self.path, 'r', libver='latest') as f:
+            for image in self.images:
+                dataset = f[image.name]
+                z_dataset = torch.tensor(dataset['z'][()])
+                Ic_dataset = torch.tensor(dataset['I'][channel])
+                length = z_dataset.shape[0]
+                z[cursor: cursor + length] = z_dataset
+                Ic[cursor: cursor + length] = Ic_dataset
+                cursor += length
+        return Ic.to(device), z.to(device)
+
+    def __len__(self):
+        return self.size
+
+
 class ImageDataset(Dataset):
     def __init__(self, image_list: list[sfm.Image], return_image: bool = True, return_depth: bool = True):
         self.images = image_list
@@ -48,7 +131,7 @@ class ImageDataset(Dataset):
             return idx, load_image(image.image_path), load_depth(image.depth_path)
 
 
-def load_cameras(model_dir: Path) -> dict[int, read_write_model.Camera]:
+def load_colmap_cameras(model_dir: Path) -> dict[int: read_write_model.Camera]:
     cameras_bin = model_dir / 'cameras.bin'
     cameras_txt = model_dir / 'cameras.txt'
     if cameras_bin.exists():
@@ -59,7 +142,7 @@ def load_cameras(model_dir: Path) -> dict[int, read_write_model.Camera]:
         raise FileExistsError(f'No cameras file found in {model_dir}.')
 
 
-def load_images(model_dir: Path) -> dict[int, read_write_model.Image]:
+def load_colmap_images(model_dir: Path) -> dict[int: read_write_model.Image]:
     images_bin = model_dir / 'images.bin'
     images_txt = model_dir / 'images.txt'
     if images_bin.exists():
@@ -85,7 +168,7 @@ def load_depth(depth_path: Path) -> Tensor:
                              f'Only PNG, TIF and TIFF are supported.')
 
 
-def loader(
+def load_images(
         image_list: list[sfm.Image],
         return_image: bool = True,
         return_depth: bool = True,
@@ -93,90 +176,3 @@ def loader(
 ) -> DataLoader:
     dataset = ImageDataset(image_list, return_image=return_image, return_depth=return_depth)
     return DataLoader(dataset, num_workers=num_workers, collate_fn=lambda x: x[0])
-
-
-def prepare_matches(
-        image_list: list[sfm.Image],
-        matches_path: Path,
-        data_path: Path,
-        num_workers: int = 0,
-        device: str = 'cpu'
-):
-    with h5py.File(matches_path, 'r', libver='latest') as r, h5py.File(data_path, 'w', libver='latest') as w:
-
-        # Find total number of observations
-        size = 0
-        for dataset in r.values():
-            size += len(dataset['u1'])
-
-        # Create one HDF5 dataset per parameter
-        w.create_dataset('u', (size,), dtype='int16')
-        w.create_dataset('v', (size,), dtype='int16')
-        w.create_dataset('z', (size,), dtype='float32')
-        w.create_dataset('Ir', (size,), dtype='float32')
-        w.create_dataset('Ig', (size,), dtype='float32')
-        w.create_dataset('Ib', (size,), dtype='float32')
-
-        # Initialize HDF5 datasets for contiguous memory
-        w['u'][()] = -1
-        w['v'][()] = -1
-        w['z'][()] = np.nan
-        w['Ir'][()] = np.nan
-        w['Ig'][()] = np.nan
-        w['Ib'][()] = np.nan
-
-        # Fill HDF5 datasets with J coordinates, pixel intensities and distances
-        cursor = 0
-        for image_idx, image_image, image_depth in tqdm.tqdm(loader(image_list, num_workers=num_workers)):
-            image = image_list[image_idx]
-            image_distance = image.distance_map(image_depth.to(device))
-            matches = r[image.name]
-            u1 = matches['u1'][()]
-            v1 = matches['v1'][()]
-            u2 = torch.tensor(matches['u2'][()], dtype=torch.int64)
-            v2 = torch.tensor(matches['v2'][()], dtype=torch.int64)
-            z = image_distance[v2, u2].cpu().numpy()
-            Ir, Ig, Ib = image_image[v2, u2].T.numpy()
-            length = u1.shape[0]
-            w['u'][cursor:cursor + length] = u1
-            w['v'][cursor:cursor + length] = v1
-            w['z'][cursor:cursor + length] = z
-            w['Ir'][cursor:cursor + length] = Ir
-            w['Ig'][cursor:cursor + length] = Ig
-            w['Ib'][cursor:cursor + length] = Ib
-            cursor += length
-
-
-def load_data(
-        data_path: Path,
-        chunk_size: int = 2**20,
-        device: str = 'cpu'
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    with h5py.File(data_path, 'r', libver='latest') as f:
-        for cursor in range(0, len(f['u']), chunk_size):
-            u = torch.tensor(f['u'][cursor:cursor + chunk_size], dtype=torch.int64, device=device)
-            v = torch.tensor(f['v'][cursor:cursor + chunk_size], dtype=torch.int64, device=device)
-            z = torch.tensor(f['z'][cursor:cursor + chunk_size], device=device)
-            Ir = torch.tensor(f['Ir'][cursor:cursor + chunk_size], device=device)
-            Ig = torch.tensor(f['Ig'][cursor:cursor + chunk_size], device=device)
-            Ib = torch.tensor(f['Ib'][cursor:cursor + chunk_size], device=device)
-            yield u, v, z, Ir, Ig, Ib
-
-
-def load_data_single_channel(
-        data_path: Path,
-        channel: int,
-        chunk_size: int = 2**20,
-        device: str = 'cpu'
-) -> tuple[Tensor, Tensor]:
-    with h5py.File(data_path, 'r', libver='latest') as f:
-        for cursor in range(0, len(f['u']), chunk_size):
-            z = torch.tensor(f['z'][cursor:cursor + chunk_size], device=device)
-            match channel:
-                case 0:
-                    Ic = torch.tensor(f['Ir'][cursor:cursor + chunk_size], device=device)
-                case 1:
-                    Ic = torch.tensor(f['Ig'][cursor:cursor + chunk_size], device=device)
-                case 2:
-                    Ic = torch.tensor(f['Ib'][cursor:cursor + chunk_size], device=device)
-            yield z, Ic

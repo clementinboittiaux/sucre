@@ -19,14 +19,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import h5py
 import numpy as np
 import torch
 import tqdm
 from PIL import Image as PILImage, ImageDraw
 from torch import Tensor
 import loader
-import dumper
 
 
 class Pose:
@@ -122,20 +120,16 @@ class Image:
         matches2 = other.match_one_way(self, u1=u2, v1=v2, wP1=wP2)
         return matches1 & matches2
 
-    def match_images(self, image_list: list[Image], matches_path: Path, min_cover: float = 0.01,
-                     num_workers: int = 0, device: str = 'cpu') -> list[Image]:
-        matched_images = []
+    def match_images(self, image_list: list[Image], matches_file: loader.MatchesFile, min_cover: float = 0.01,
+                     num_workers: int = 0, device: str = 'cpu'):
         u1, v1, wP1 = self.unproject_depth_map(loader.load_depth(self.depth_path).to(device))
-        with h5py.File(matches_path, 'w', libver='latest') as f:
-            for other_idx, other_depth_map in tqdm.tqdm(
-                    loader.loader(image_list, return_image=False, num_workers=num_workers)):
-                other = image_list[other_idx]
-                u2, v2, wP2 = other.unproject_depth_map(other_depth_map.to(device))
-                other_matches = self.match_two_way(other, u1=u1, v1=v1, wP1=wP1, u2=u2, v2=v2, wP2=wP2)
-                if len(other_matches) / (self.camera.width * self.camera.height) > min_cover:
-                    matched_images.append(other)
-                    dumper.save_matches(stream=f, matches=other_matches)
-        return matched_images
+        for other_idx, other_depth_map in tqdm.tqdm(
+                loader.load_images(image_list, return_image=False, num_workers=num_workers)):
+            other = image_list[other_idx]
+            u2, v2, wP2 = other.unproject_depth_map(other_depth_map.to(device))
+            other_matches = self.match_two_way(other, u1=u1, v1=v1, wP1=wP1, u2=u2, v2=v2, wP2=wP2)
+            if len(other_matches) / (self.camera.width * self.camera.height) > min_cover:
+                matches_file.save_matches(other_matches)
 
     def __repr__(self) -> str:
         """String representation"""
@@ -195,7 +189,7 @@ class Matches:
 class COLMAPModel:
     def __init__(self, model_dir: Path, image_dir: Path, depth_dir: Path):
         self.cameras = {}
-        for camera in loader.load_cameras(model_dir).values():
+        for camera in loader.load_colmap_cameras(model_dir).values():
             fx, fy, u0, v0 = camera.params
             self.cameras[camera.id] = Camera(
                 camera_id=camera.id,
@@ -209,7 +203,7 @@ class COLMAPModel:
             )
 
         self.images = {}
-        for image in loader.load_images(model_dir).values():
+        for image in loader.load_colmap_images(model_dir).values():
             image_path = image_dir / image.name
             depth_path = (depth_dir / image.name).with_stem('depth_' + image_path.stem).with_suffix('.png')
             self.images[image.id] = Image(

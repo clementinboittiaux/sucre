@@ -29,21 +29,30 @@ import yaml
 from PIL import Image
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
+import gaussian_seathru
+import sfm
 
-from sfm import COLMAPModel, Image
+
+def initialize_sucre_parameters(image: sfm.Image, channel: int, device: str = 'cpu') -> tuple[float, float, float]:
+    Ic = loader.load_image(image.image_path)[:, :, channel].to(device)
+    z = image.distance_map(loader.load_depth(image.depth_path).to(device))
+    args_valid = z > 0
+    B, beta, gamma = gaussian_seathru.solve_linear(Ic[args_valid], z[args_valid])
+    return B, beta, gamma
 
 
 class SUCReModel(torch.nn.Module):
-    def __init__(self, image: Image):
+    def __init__(self, image: sfm.Image, B: list[float, float, float], beta, gamma):
         """SUCRe model
 
         :param image: image to restore.
         """
         super().__init__()
         self.J = torch.nn.Parameter(loader.load_image(image.image_path))
-        self.B = torch.nn.Parameter(torch.tensor(0.25))
-        self.beta = torch.nn.Parameter(torch.tensor(0.1))
-        self.gamma = torch.nn.Parameter(torch.tensor(0.1))
+        self.B = torch.nn.Parameter(torch.tensor(B, dtype=torch.float32))
+        self.beta = torch.nn.Parameter(torch.tensor(beta, dtype=torch.float32))
+        self.gamma = torch.nn.Parameter(torch.tensor(gamma, dtype=torch.float32))
+        self.args_valid = loader.load_depth(image.depth_path) > 0
 
     def forward(self, u: Tensor, v: Tensor, z: Tensor) -> Tensor:
         """Compute the underwater image formation model
@@ -54,6 +63,7 @@ class SUCReModel(torch.nn.Module):
         :return: the image at coordinates (u, v), as seen at distances z,
         given the current image formation model parameters.
         """
+        z = z.unsqueeze(dim=1).repeat(1, 3)
         return self.J[v, u] * torch.exp(-self.beta * z) + self.B * (1 - torch.exp(-self.gamma * z))
 
     def restore(self) -> np.array:
@@ -72,20 +82,40 @@ class SUCReModel(torch.nn.Module):
         return J_plot
 
 
-def optimization(
-        image: Image,
-        image_list: list[Image],
-        matches_path: Path,
-        channel: int,
-        num_workers: int = 0,
-        device: str = 'cpu'
-):
-    Ic, z, u, v = loader
+def optimize(image: sfm.Image, channel: int, matches_file: loader.MatchesFile, device: str = 'cpu'):
+    print('Initialize parameters with Gaussian Sea-thru.')
+    B, beta, gamma = initialize_sucre_parameters(image, channel=channel, device=device)
+    print(f'B: {B}\nbeta: {beta}\ngamma: {gamma}')
+
+    beta = torch.tensor(beta, dtype=torch.float32, device=device)
+    gamma = torch.tensor(gamma, dtype=torch.float32, device=device)
+
+    data = matches_file.load_channel(channel)
+
+    sum_Ii_betai = torch.zeros(image.camera.height, image.camera.height, device=device)
+    sum_bi_betai = torch.zeros_like(sum_Ii_betai)
+    sum_betai2 = torch.zeros_like(sum_Ii_betai)
+    for ui, vi, zi, Ii in data:
+        ui, vi = ui.long(), vi.long()
+        zi, Ii = zi.to(device), Ii.to(device)
+        betai = torch.exp(-beta * zi)
+        bi = 1 - torch.exp(-gamma * zi)
+        sum_Ii_betai[vi, ui] += Ii * betai
+        sum_bi_betai[vi, ui] += bi * betai
+        sum_betai2[vi, ui] += torch.square(betai)
+    A = sum_Ii_betai / sum_betai2
+    D = sum_bi_betai / sum_betai2
+
+
+    print('super')
+
+
+
 
 
 
 def sucre(
-        colmap_model: COLMAPModel,
+        colmap_model: sfm.COLMAPModel,
         image_name: str,
         output_dir: Path,
         min_cover: float,
@@ -100,39 +130,33 @@ def sucre(
     if filter_image_names is not None:
         image_list = [im for im in image_list if im.name not in filter_image_names]
 
-    # Compute all matches
     print(f'Compute {image_name} matches.')
-    matches_path = output_dir / (image.image_path.stem + '_matches.h5')
-    matched_images = image.match_images(
+    matches_file = loader.MatchesFile((output_dir / image_name).with_suffix('.h5'))
+    image.match_images(
         image_list=image_list,
-        matches_path=matches_path,
+        matches_file=matches_file,
         min_cover=min_cover,
         num_workers=num_workers,
         device=device
     )
 
-    # Prepare matches for optimization
     print('Prepare matches for optimization.')
-    data_path = output_dir / (image.image_path.stem + '_data.h5')
-    loader.prepare_matches(
-        image_list=matched_images,
-        matches_path=matches_path,
-        data_path=data_path,
-        num_workers=num_workers,
-        device=device
-    )
+    matches_file.prepare_matches(num_workers=num_workers, device=device)
 
-
-
-
+    B, beta, gamma = [], [], []
+    for channel in range(3):
+        print(f'SUCRe optimization on {["red", "green", "blue"][channel]} channel.')
+        optimize(image=image, channel=channel, matches_file=matches_file, device=device)
+        # Bc, betac, gammac = initialize_sucre_parameters(image, channel=channel, device=device)
+        # B.append(Bc)
+        # beta.append(betac)
+        # gamma.append(gammac)
 
     raise Exception
 
-    # sucre_optim(image, )
-
     # Initialize SUCRe's model parameters
     print(f'Restoring {image_name}.')
-    model = SUCRe(image, args_valid)
+    model = SUCReModel(image, B, beta, gamma)
     model.to(device)
 
     # Setup Adam optimizer
@@ -140,6 +164,9 @@ def sucre(
 
     # Setup logger
     writer = SummaryWriter(str(output_dir / datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')))
+
+    # Setup data
+    u, v, z, I = matches_file.load_all()
 
     epochs = 150
     split_size = 2097152
@@ -198,7 +225,7 @@ def sucre(
 
 def parse_args(args: argparse.Namespace):
     print('Loading COLMAP model.')
-    colmap_model = COLMAPModel(model_dir=args.model_dir, image_dir=args.image_dir, depth_dir=args.depth_dir)
+    colmap_model = sfm.COLMAPModel(model_dir=args.model_dir, image_dir=args.image_dir, depth_dir=args.depth_dir)
 
     filter_image_names = args.filter_images_path.read_text().splitlines() if args.filter_images_path else None
 
