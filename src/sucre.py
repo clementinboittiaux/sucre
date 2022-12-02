@@ -22,10 +22,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import loader
 from PIL import Image
 from torch import Tensor
+
 import gaussian_seathru
+import loader
 import normalization
 import sfm
 
@@ -34,8 +35,8 @@ def initialize_sucre_parameters(image: sfm.Image, channel: int, device: str = 'c
     Ic = loader.load_image(image.image_path)[:, :, channel].to(device)
     z = image.distance_map(loader.load_depth(image.depth_path).to(device))
     args_valid = z > 0
-    B, beta, gamma = gaussian_seathru.solve_linear(Ic[args_valid], z[args_valid])
-    return B, beta, gamma
+    Bc, betac, gammac = gaussian_seathru.solve_gaussian_seathru(Ic[args_valid], z[args_valid], linear_beta=True)
+    return Bc, betac, gammac
 
 
 def iter_data(data: list[tuple[Tensor, Tensor, Tensor, Tensor]],

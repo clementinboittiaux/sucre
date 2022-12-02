@@ -22,9 +22,11 @@ import numpy as np
 import torch
 from PIL import Image
 from scipy.optimize import minimize
-
-from sfm import COLMAPModel
 from torch import Tensor
+
+import loader
+import normalization
+import sfm
 
 
 def compute_beta(z: Tensor, tau: float, phi: float, chi: float, omega: float) -> Tensor:
@@ -40,7 +42,7 @@ def compute_beta(z: Tensor, tau: float, phi: float, chi: float, omega: float) ->
     return tau * torch.exp(-phi * z) + chi * torch.exp(-omega * z)
 
 
-def compute_m(z: Tensor, B: float, beta: float | Tensor, gamma: float, mu: float) -> Tensor:
+def compute_m(z: Tensor, B: float, beta: float | Tensor, gamma: float, mu: Tensor) -> Tensor:
     """Compute m, distance-dependent mean of acquired image
 
     :param z: distances, shape (n,).
@@ -53,7 +55,7 @@ def compute_m(z: Tensor, B: float, beta: float | Tensor, gamma: float, mu: float
     return mu * torch.exp(-beta * z) + B * (1 - torch.exp(-gamma * z))
 
 
-def compute_s(z: Tensor, beta: float | Tensor, sigma: float) -> Tensor:
+def compute_s(z: Tensor, beta: float | Tensor, sigma: Tensor) -> Tensor:
     """Compute s, distance-dependent standard deviation of acquired image
 
     :param z: distances, shape (n,).
@@ -88,44 +90,7 @@ def compute_J(I: Tensor, z: Tensor, B: float, beta: float | Tensor, gamma: float
     return (I - B * (1 - torch.exp(-gamma * z))) * torch.exp(beta * z)
 
 
-def solve_linear(Ic: Tensor, z: Tensor) -> np.array:
-    def residuals(x):
-        Bc_hat, betac_hat, gammac_hat = x.tolist()
-
-        # Compute Jc from estimated parameters
-        Jc_hat = compute_J(Ic, z, Bc_hat, betac_hat, gammac_hat)
-
-        # Compute mu and sigma from the estimation of Jc
-        muc_hat = Jc_hat.mean()
-        sigmac_hat = Jc_hat.std()
-
-        # Compute m and s from all previously estimated parameters
-        mc_hat = compute_m(z, Bc_hat, betac_hat, gammac_hat, muc_hat)
-        sc_hat = compute_s(z, betac_hat, sigmac_hat)
-
-        return compute_loss(Ic, mc_hat, sc_hat).item()
-
-    parameters_init = [0.25, 0.1, 0.1]
-
-    # Minimize the negative log likelihood using simplex algorithm
-    parameters = minimize(
-        residuals,
-        np.array(parameters_init),
-        method='Nelder-Mead',
-        bounds=[(0, np.inf)] * len(parameters_init),
-        options={'maxiter': 10000, 'disp': True}
-    )
-    return parameters.x
-
-
-def solve_normal(Ic: Tensor, z: Tensor, linear_beta: bool = False) -> dict:
-    """Solve the minimization problem with simplex algorithm
-
-    :param Ic: acquired image, shape (n,).
-    :param z: distances, shape (n,).
-    :param linear_beta: whether to use Sea-thru model (False) or SUCRe model (True).
-    :return: parameters of the model.
-    """
+def solve_gaussian_seathru(Ic: Tensor, z: Tensor, linear_beta: bool = False) -> tuple[float, float | Tensor, float]:
     def residuals(x):
         if linear_beta:
             Bc_hat, betac_hat, gammac_hat = x.tolist()
@@ -162,31 +127,17 @@ def solve_normal(Ic: Tensor, z: Tensor, linear_beta: bool = False) -> dict:
         options={'maxiter': 10000, 'disp': True}
     )
 
-    print(f'Final cost: {parameters.fun}')
-
     if linear_beta:
         Bc, betac, gammac = parameters.x.tolist()
-        return {
-            'Bc': Bc,
-            'betac': betac,
-            'gammac': gammac
-        }
     else:
         Bc, tauc, phic, chic, omegac, gammac = parameters.x.tolist()
         betac = compute_beta(z, tauc, phic, chic, omegac)
-        return {
-            'Bc': Bc,
-            'tauc': tauc,
-            'phic': phic,
-            'chic': chic,
-            'omegac': omegac,
-            'betac': betac,
-            'gammac': gammac
-        }
+
+    return Bc, betac, gammac
 
 
 def gaussian_seathru(
-        colmap_model: COLMAPModel,
+        colmap_model: sfm.COLMAPModel,
         image_name: str,
         output_dir: Path,
         linear_beta: bool = False,
@@ -205,56 +156,54 @@ def gaussian_seathru(
     colmap_image = colmap_model[image_name]
 
     # Load the image
-    image = colmap_image.image().to(device)
+    image = loader.load_image(colmap_image.image_path).to(device)
 
     # Compute the distance map from the image's depth map and intrinsics
-    distance_map = colmap_image.distance_map(colmap_image.depth_map().to(device))
+    distance_map = colmap_image.distance_map(loader.load_depth(colmap_image.depth_path).to(device))
 
     # Only select pixels where there is depth information
-    args_valid = distance_map > 0
-    image_valid = image[args_valid]
-    distance_map_valid = distance_map[args_valid]
+    v_valid, u_valid = torch.where(distance_map > 0)
+    image_valid = image[v_valid, u_valid]
+    distance_map_valid = distance_map[v_valid, u_valid]
 
-    params = []
-    for c in range(3):  # For each color channel
-        # Solve the minimization problem
-        print(f'Minimizing cost function for {["red", "green", "blue"][c]} channel.')
-        params.append(solve_normal(image_valid[:, c], distance_map_valid, linear_beta=linear_beta))
+    J = torch.full(image.shape, torch.nan, dtype=torch.float32)
+    for channel in range(3):
+        print(f'Minimizing cost function for {["red", "green", "blue"][channel]} channel.')
+        Bc, betac, gammac = solve_gaussian_seathru(image_valid[:, channel], distance_map_valid, linear_beta)
+        print(f'Bc: {Bc}\nbetac: {betac}\ngammac: {gammac}')
+        J[v_valid.cpu(), u_valid.cpu(), channel] = compute_J(
+            image_valid[:, channel], distance_map_valid, Bc, betac, gammac
+        ).cpu()
 
-    J = np.zeros(image.shape)
-    for c in range(3):  # For each channel
-        #  Stretch the channel histogram
-        Jc = compute_J(image_valid[:, c], distance_map_valid, params[c]['Bc'], params[c]['betac'],
-                       params[c]['gammac']).cpu().numpy()
-        Jc = np.clip(Jc, np.percentile(Jc, 1), np.percentile(Jc, 99))
-        Jc = Jc - Jc.min()
-        Jc = Jc / Jc.max()
-        J[args_valid.cpu(), c] = Jc
-
-    # Save the image
+    print('Save restored image.')
     output_dir.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(np.uint8(J * 255)).save((output_dir / image_name).with_suffix('.png'))
+    Image.fromarray(
+        np.uint8(normalization.histogram_stretching(J) * 255)
+    ).save((output_dir / image_name).with_suffix('.png'))
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Gaussian Sea-thru.',
-                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--data-dir', required=True, type=Path,
-                        help='path to data directory with folders `depth_maps`, `images` and `sparse`.')
-    parser.add_argument('--output-dir', required=True, type=Path, help='path to output directory.')
-    parser.add_argument('--image-name', required=True, type=str, help='name of the image to be restored.')
-    parser.add_argument('--linear-beta', action=argparse.BooleanOptionalAction, default=False,
-                        help='switch between Sea-thru model (False) and SUCRe model (True).')
-    parser.add_argument('--device', type=str, default='cpu', help='device for heavy computation.')
-    args = parser.parse_args()
-
+def parse_args(args: argparse.Namespace):
     print('Loading COLMAP model.')
-    args_colmap = COLMAPModel(data_dir=args.data_dir, voxel_size=1.0)
+    colmap_model = sfm.COLMAPModel(model_dir=args.model_dir, image_dir=args.image_dir, depth_dir=args.depth_dir)
 
     gaussian_seathru(
-        colmap_model=args_colmap,
+        colmap_model=colmap_model,
         image_name=args.image_name,
         output_dir=args.output_dir,
         linear_beta=args.linear_beta,
         device=args.device
     )
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Gaussian Sea-thru.',
+                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('--image-dir', required=True, type=Path, help='path to images directory.')
+    parser.add_argument('--depth-dir', required=True, type=Path, help='path to depth maps directory.')
+    parser.add_argument('--model-dir', required=True, type=Path, help='path to undistorted COLMAP model directory.')
+    parser.add_argument('--output-dir', required=True, type=Path, help='path to output directory.')
+    parser.add_argument('--image-name', required=True, type=str, help='name of the image to be restored.')
+    parser.add_argument('--linear-beta', action='store_true', help='switch from Sea-thru model to SUCRe model.')
+    parser.add_argument('--device', type=str, default='cpu', help='device for heavy computation.')
+
+    parse_args(parser.parse_args())

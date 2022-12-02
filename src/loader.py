@@ -17,16 +17,18 @@
 
 from __future__ import annotations
 
-import cv2
-import torch
-import numpy as np
 from pathlib import Path
+
+import cv2
+import h5py
+import numpy as np
+import torch
+import tqdm
 from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
-from colmap.scripts.python import read_write_model
+
 import sfm
-import tqdm
-import h5py
+from colmap.scripts.python import read_write_model
 
 
 class MatchesFile:
