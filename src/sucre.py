@@ -23,12 +23,11 @@ from pathlib import Path
 import numpy as np
 import torch
 import loader
-import yaml
 from PIL import Image
 from torch import Tensor
 import gaussian_seathru
 import normalization
-from scipy.optimize import minimize
+from scipy.optimize import minimize, least_squares
 import sfm
 
 
@@ -89,24 +88,58 @@ def solve_sucre(image: sfm.Image, channel: int, matches_file: loader.MatchesFile
 
     data = matches_file.load_channel(channel)
 
+    # TODO: Gauss-Newton
+
     def residuals(x):
         betac_hat, gammac_hat = x.tolist()
         Bc_hat, Jc_hat = compute_B_and_J(image=image, data=data, beta=betac_hat, gamma=gammac_hat, device=device)
-        res = torch.zeros(image.camera.height, image.camera.width, device=device)
+        res = np.zeros(len(matches_file), dtype=np.float32)
+        cursor = 0
         for ui, vi, zi, Ii in iter_data(data, device=device):
-            res[vi, ui] += torch.square(
+            length = zi.shape[0]
+            res[cursor: cursor + length] = (
                 Ii - Jc_hat[vi, ui] * torch.exp(-betac_hat * zi) - Bc_hat * (1 - torch.exp(-gammac_hat * zi))
-            )
-        res = (res / len(matches_file)).sum()
-        return res.item()
+            ).cpu().numpy()
+            cursor += length
+        return res
+
+    def jacobian(x):
+        betac_hat, gammac_hat = x.tolist()
+        Bc_hat, Jc_hat = compute_B_and_J(image=image, data=data, beta=betac_hat, gamma=gammac_hat, device=device)
+        jac = np.zeros((len(matches_file), 2), dtype=np.float32)
+        cursor = 0
+        for ui, vi, zi, Ii in iter_data(data, device=device):
+            length = zi.shape[0]
+            jac[cursor: cursor + length, 0] = (zi * Jc_hat[vi, ui] * torch.exp(-betac_hat * zi)).cpu().numpy()
+            jac[cursor: cursor + length, 1] = (-zi * Bc_hat * torch.exp(-gammac_hat * zi)).cpu().numpy()
+            cursor += length
+        return jac
+
+
+    # def residuals(x):
+    #     betac_hat, gammac_hat = x.tolist()
+    #     Bc_hat, Jc_hat = compute_B_and_J(image=image, data=data, beta=betac_hat, gamma=gammac_hat, device=device)
+    #     res = torch.zeros(image.camera.height, image.camera.width, device=device)
+    #     for ui, vi, zi, Ii in iter_data(data, device=device):
+    #         res[vi, ui] += torch.square(
+    #             Ii - Jc_hat[vi, ui] * torch.exp(-betac_hat * zi) - Bc_hat * (1 - torch.exp(-gammac_hat * zi))
+    #         )
+    #     res = res.sum()
+    #     return res.item()
 
     print('Start SUCRe optimization.')
-    parameters = minimize(
+    # parameters = minimize(
+    #     residuals,
+    #     np.array([betac_init, gammac_init]),
+    #     method='Nelder-Mead',
+    #     options={'maxiter': 10000, 'disp': True}
+    # )
+    parameters = least_squares(
         residuals,
         np.array([betac_init, gammac_init]),
-        method='Nelder-Mead',
-        bounds=[(0, np.inf), (0, np.inf)],
-        options={'maxiter': 10000, 'disp': True}
+        method='lm',
+        jac=jacobian,
+        verbose=2
     )
 
     betac, gammac = parameters.x.tolist()
@@ -148,7 +181,9 @@ def sucre(
 
     J = torch.full((image.camera.height, image.camera.width, 3), torch.nan, dtype=torch.float32)
     for channel in range(3):
+        print(f'----------------------{["---", "-----", "----"][channel]}---------')
         print(f'SUCRe optimization on {["red", "green", "blue"][channel]} channel.')
+        print(f'----------------------{["---", "-----", "----"][channel]}---------')
         J[:, :, channel], Bc, betac, gammac = solve_sucre(
             image=image, channel=channel, matches_file=matches_file, device=device
         )
