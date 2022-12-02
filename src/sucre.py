@@ -27,7 +27,6 @@ from PIL import Image
 from torch import Tensor
 import gaussian_seathru
 import normalization
-from scipy.optimize import minimize, least_squares
 import sfm
 
 
@@ -48,8 +47,8 @@ def iter_data(data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
 def compute_B_and_J(
         image: sfm.Image,
         data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
-        beta: float,
-        gamma: float,
+        beta: Tensor,
+        gamma: Tensor,
         device: str = 'cpu'
 ) -> tuple[Tensor, Tensor]:
     sum_Ii_betai = torch.zeros(image.camera.height, image.camera.width, device=device)
@@ -81,73 +80,56 @@ def compute_B_and_J(
     return B, J
 
 
-def solve_sucre(image: sfm.Image, channel: int, matches_file: loader.MatchesFile, device: str = 'cpu'):
+def solve_sucre(
+        image: sfm.Image,
+        channel: int,
+        matches_file: loader.MatchesFile,
+        max_iter: int = 200,
+        device: str = 'cpu'
+):
     print('Initialize parameters with Gaussian Sea-thru.')
-    Bc_init, betac_init, gammac_init = initialize_sucre_parameters(image, channel=channel, device=device)
-    print(f'B: {Bc_init}\nbeta: {betac_init}\ngamma: {gammac_init}')
+    Bc, betac, gammac = initialize_sucre_parameters(image, channel=channel, device=device)
+    print(f'Bc: {Bc}\nbetac: {betac}\ngammac: {gammac}')
 
-    data = matches_file.load_channel(channel)
+    data = matches_file.load_channel(channel, pin_memory=device.lower() != 'cpu')
 
-    # TODO: Gauss-Newton
+    print(f'Optimize Jc, Bc, betac and gammac in a Gauss-Newton scheme ({max_iter} maximum iterations).')
+    betac = torch.tensor(betac, dtype=torch.float32, device=device)
+    gammac = torch.tensor(gammac, dtype=torch.float32, device=device)
+    residuals = torch.zeros(len(matches_file), dtype=torch.float32, device=device)
+    jacobian = torch.zeros(len(matches_file), 2, dtype=torch.float32, device=device)
 
-    def residuals(x):
-        betac_hat, gammac_hat = x.tolist()
-        Bc_hat, Jc_hat = compute_B_and_J(image=image, data=data, beta=betac_hat, gamma=gammac_hat, device=device)
-        res = np.zeros(len(matches_file), dtype=np.float32)
+    previous_cost = torch.inf
+
+    for iteration in range(max_iter):
+
+        Bc, Jc = compute_B_and_J(image=image, data=data, beta=betac, gamma=gammac, device=device)
+
         cursor = 0
         for ui, vi, zi, Ii in iter_data(data, device=device):
             length = zi.shape[0]
-            res[cursor: cursor + length] = (
-                Ii - Jc_hat[vi, ui] * torch.exp(-betac_hat * zi) - Bc_hat * (1 - torch.exp(-gammac_hat * zi))
-            ).cpu().numpy()
+            residuals[cursor: cursor + length] = (
+                    Ii - Jc[vi, ui] * torch.exp(-betac * zi) - Bc * (1 - torch.exp(-gammac * zi))
+            )
+            jacobian[cursor: cursor + length, 0] = (zi * Jc[vi, ui] * torch.exp(-betac * zi))
+            jacobian[cursor: cursor + length, 1] = (-zi * Bc * torch.exp(-gammac * zi))
             cursor += length
-        return res
 
-    def jacobian(x):
-        betac_hat, gammac_hat = x.tolist()
-        Bc_hat, Jc_hat = compute_B_and_J(image=image, data=data, beta=betac_hat, gamma=gammac_hat, device=device)
-        jac = np.zeros((len(matches_file), 2), dtype=np.float32)
-        cursor = 0
-        for ui, vi, zi, Ii in iter_data(data, device=device):
-            length = zi.shape[0]
-            jac[cursor: cursor + length, 0] = (zi * Jc_hat[vi, ui] * torch.exp(-betac_hat * zi)).cpu().numpy()
-            jac[cursor: cursor + length, 1] = (-zi * Bc_hat * torch.exp(-gammac_hat * zi)).cpu().numpy()
-            cursor += length
-        return jac
+        delta = torch.inverse(jacobian.T @ jacobian) @ (jacobian.T @ residuals)
+        betac -= delta[0]
+        gammac -= delta[1]
 
+        cost = torch.square(residuals).sum()
+        cost_change = torch.abs(previous_cost - cost) / cost
+        print(f'iter: {iteration:04d}, cost: {cost.item():.8e}, cost change: {cost_change.item():.8e}, '
+              f'Bc: {Bc.item():.3e}, betac: {betac.item():.3e}, gammac: {gammac.item():.3e}')
+        if cost_change < 1e-5:
+            break
+        previous_cost = cost
 
-    # def residuals(x):
-    #     betac_hat, gammac_hat = x.tolist()
-    #     Bc_hat, Jc_hat = compute_B_and_J(image=image, data=data, beta=betac_hat, gamma=gammac_hat, device=device)
-    #     res = torch.zeros(image.camera.height, image.camera.width, device=device)
-    #     for ui, vi, zi, Ii in iter_data(data, device=device):
-    #         res[vi, ui] += torch.square(
-    #             Ii - Jc_hat[vi, ui] * torch.exp(-betac_hat * zi) - Bc_hat * (1 - torch.exp(-gammac_hat * zi))
-    #         )
-    #     res = res.sum()
-    #     return res.item()
-
-    print('Start SUCRe optimization.')
-    # parameters = minimize(
-    #     residuals,
-    #     np.array([betac_init, gammac_init]),
-    #     method='Nelder-Mead',
-    #     options={'maxiter': 10000, 'disp': True}
-    # )
-    parameters = least_squares(
-        residuals,
-        np.array([betac_init, gammac_init]),
-        method='lm',
-        jac=jacobian,
-        verbose=2
-    )
-
-    betac, gammac = parameters.x.tolist()
     Bc, Jc = compute_B_and_J(image=image, data=data, beta=betac, gamma=gammac, device=device)
-
-    print(f'B: {Bc}\nbeta: {betac}\ngamma: {gammac}')
-
-    return Jc.cpu(), Bc.item(), betac, gammac
+    print(f'Bc: {Bc.item()}\nbetac: {betac.item()}\ngammac: {gammac.item()}')
+    return Jc.cpu(), Bc.item(), betac.item(), gammac.item()
 
 
 def sucre(

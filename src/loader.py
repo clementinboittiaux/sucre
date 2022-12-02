@@ -59,17 +59,25 @@ class MatchesFile:
                 dataset['z'][()] = image_distance[v2, u2].cpu().numpy()
                 dataset['I'][()] = image_image[v2, u2].T.numpy()
 
-    def load_channel(self, channel: int) -> list[tuple[Tensor, Tensor, Tensor, Tensor]]:
+    def load_channel(self, channel: int, pin_memory: bool = False) -> list[tuple[Tensor, Tensor, Tensor, Tensor]]:
         data = []
         with h5py.File(self.path, 'r', libver='latest') as f:
             for image in self.images:
                 dataset = f[image.name]
-                data.append((
-                    torch.tensor(dataset['u1'][()]),
-                    torch.tensor(dataset['v1'][()]),
-                    torch.tensor(dataset['z'][()]),
-                    torch.tensor(dataset['I'][channel])
-                ))
+                if pin_memory:
+                    data.append((
+                        torch.tensor(dataset['u1'][()]).pin_memory(),
+                        torch.tensor(dataset['v1'][()]).pin_memory(),
+                        torch.tensor(dataset['z'][()]).pin_memory(),
+                        torch.tensor(dataset['I'][channel]).pin_memory()
+                    ))
+                else:
+                    data.append((
+                        torch.tensor(dataset['u1'][()]),
+                        torch.tensor(dataset['v1'][()]),
+                        torch.tensor(dataset['z'][()]),
+                        torch.tensor(dataset['I'][channel])
+                    ))
         return data
 
     def __len__(self):
