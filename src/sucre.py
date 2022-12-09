@@ -86,6 +86,7 @@ def solve_sucre(
         channel: int,
         matches_file: loader.MatchesFile,
         max_iter: int = 200,
+        function_tolerance: float = 1e-5,
         device: str = 'cpu'
 ):
     print('Initialize parameters with Gaussian Sea-thru.')
@@ -124,7 +125,7 @@ def solve_sucre(
         cost_change = torch.abs(previous_cost - cost) / cost
         print(f'iter: {iteration:04d}, cost: {cost.item():.8e}, cost change: {cost_change.item():.8e}, '
               f'Bc: {Bc.item():.3e}, betac: {betac.item():.3e}, gammac: {gammac.item():.3e}')
-        if cost_change < 1e-5:
+        if cost_change < function_tolerance:
             break
         previous_cost = cost
 
@@ -139,8 +140,11 @@ def sucre(
         output_dir: Path,
         min_cover: float,
         filter_image_names: list[str] = None,
+        max_iter: int = 200,
+        function_tolerance: float = 1e-5,
         num_workers: int = 0,
-        device: str = 'cpu'
+        device: str = 'cpu',
+        keep_matches: bool = False
 ):
     image = colmap_model[image_name]
     image_list = list(colmap_model.images.values())
@@ -150,7 +154,8 @@ def sucre(
         image_list = [im for im in image_list if im.name not in filter_image_names]
 
     print(f'Compute {image_name} matches.')
-    matches_file = loader.MatchesFile((output_dir / image_name).with_suffix('.h5'))
+    matches_path = (output_dir / image_name).with_suffix('.h5')
+    matches_file = loader.MatchesFile(matches_path)
     image.match_images(
         image_list=image_list,
         matches_file=matches_file,
@@ -168,13 +173,22 @@ def sucre(
         print(f'SUCRe optimization on {["red", "green", "blue"][channel]} channel.')
         print(f'----------------------{["---", "-----", "----"][channel]}---------')
         J[:, :, channel], Bc, betac, gammac = solve_sucre(
-            image=image, channel=channel, matches_file=matches_file, device=device
+            image=image,
+            channel=channel,
+            matches_file=matches_file,
+            max_iter=max_iter,
+            function_tolerance=function_tolerance,
+            device=device
         )
 
     print('Save restored image.')
     Image.fromarray(
         np.uint8(normalization.histogram_stretching(J) * 255)
     ).save((output_dir / image_name).with_suffix('.png'))
+
+    if not keep_matches:
+        print(f'Deleting {matches_path}.')
+        matches_path.unlink()
 
 
 def parse_args(args: argparse.Namespace):
@@ -200,8 +214,11 @@ def parse_args(args: argparse.Namespace):
             output_dir=args.output_dir,
             min_cover=args.min_cover,
             filter_image_names=filter_image_names,
+            max_iter=args.max_iter,
+            function_tolerance=args.function_tolerance,
             num_workers=args.num_workers,
-            device=args.device
+            device=args.device,
+            keep_matches=args.keep_matches
         )
 
 
@@ -223,7 +240,11 @@ if __name__ == '__main__':
     parser.add_argument('--filter-images-path', type=Path,
                         help='path to a .txt file with names of images to '
                              'discard when computing matches, one name per line.')
+    parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
+    parser.add_argument('--function-tolerance', type=float, default=1e-5,
+                        help='stops optimization if cost function change is below this threshold.')
     parser.add_argument('--num-workers', type=int, default=0, help='number of threads, 0 is the main thread.')
     parser.add_argument('--device', type=str, default='cpu', help='device for heavy computation.')
+    parser.add_argument('--keep-matches', action='store_true', help='keep matches files (can take a lot a space).')
 
     parse_args(parser.parse_args())
