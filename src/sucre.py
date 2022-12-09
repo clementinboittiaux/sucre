@@ -45,40 +45,44 @@ def iter_data(data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
         yield u.to(device).long(), v.to(device).long(), z.to(device), Ic.to(device)
 
 
-def compute_B_and_J(
-        image: sfm.Image,
+def compute_Bc_Jc(
         data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
-        beta: Tensor,
-        gamma: Tensor,
+        betac: Tensor,
+        gammac: Tensor,
+        Xc_numerator_buffer: Tensor,
+        Yc_numerator_buffer: Tensor,
+        XYc_denominator_buffer: Tensor,
+        Bc_numerator_buffer: Tensor,
+        Bc_denominator_buffer: Tensor,
         device: str = 'cpu'
 ) -> tuple[Tensor, Tensor]:
-    sum_Ii_betai = torch.zeros(image.camera.height, image.camera.width, device=device)
-    sum_bi_betai = torch.zeros_like(sum_Ii_betai)
-    sum_betai2 = torch.zeros_like(sum_Ii_betai)
-    sum_mi_ni = torch.zeros_like(sum_Ii_betai)
-    sum_ni2 = torch.zeros_like(sum_Ii_betai)
+    Xc_numerator_buffer[:] = 0
+    Yc_numerator_buffer[:] = 0
+    XYc_denominator_buffer[:] = 0
+    Bc_numerator_buffer[:] = 0
+    Bc_denominator_buffer[:] = 0
 
-    for ui, vi, zi, Ii in iter_data(data, device=device):
-        betai = torch.exp(-beta * zi)
-        bi = 1 - torch.exp(-gamma * zi)
-        sum_Ii_betai[vi, ui] += Ii * betai
-        sum_bi_betai[vi, ui] += bi * betai
-        sum_betai2[vi, ui] += torch.square(betai)
+    for ui, vi, zi, Iic in iter_data(data, device=device):
+        aic = torch.exp(-betac * zi)
+        bic = 1 - torch.exp(-gammac * zi)
+        Xc_numerator_buffer[vi, ui] += Iic * aic
+        Yc_numerator_buffer[vi, ui] += bic * aic
+        XYc_denominator_buffer[vi, ui] += torch.square(aic)
 
-    A = sum_Ii_betai / sum_betai2
-    D = sum_bi_betai / sum_betai2
+    Xc = Xc_numerator_buffer / XYc_denominator_buffer
+    Yc = Yc_numerator_buffer / XYc_denominator_buffer
 
-    for ui, vi, zi, Ii in iter_data(data, device=device):
-        betai = torch.exp(-beta * zi)
-        bi = 1 - torch.exp(-gamma * zi)
-        mi = A[vi, ui] * betai - Ii
-        ni = D[vi, ui] * betai - bi
-        sum_mi_ni[vi, ui] += mi * ni
-        sum_ni2[vi, ui] += torch.square(ni)
+    for ui, vi, zi, Iic in iter_data(data, device=device):
+        aic = torch.exp(-betac * zi)
+        bic = 1 - torch.exp(-gammac * zi)
+        Mic = Iic - Xc[vi, ui] * aic
+        Nic = bic - Yc[vi, ui] * aic
+        Bc_numerator_buffer[vi, ui] += Mic * Nic
+        Bc_denominator_buffer[vi, ui] += torch.square(Nic)
 
-    B = sum_mi_ni.sum() / sum_ni2.sum()
-    J = A - B * D
-    return B, J
+    Bc = Bc_numerator_buffer.sum() / Bc_denominator_buffer.sum()
+    Jc = Xc - Bc * Yc
+    return Bc, Jc
 
 
 def solve_sucre(
@@ -97,6 +101,11 @@ def solve_sucre(
     print(f'Optimize Jc, Bc, betac and gammac in a Gauss-Newton scheme ({max_iter} maximum iterations).')
     betac = torch.tensor(betac, dtype=torch.float32, device=device)
     gammac = torch.tensor(gammac, dtype=torch.float32, device=device)
+    Xc_numerator_buffer = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
+    Yc_numerator_buffer = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
+    XYc_denominator_buffer = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
+    Bc_numerator_buffer = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
+    Bc_denominator_buffer = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
     residuals = torch.zeros(len(matches_file), dtype=torch.float32, device=device)
     jacobian = torch.zeros(len(matches_file), 2, dtype=torch.float32, device=device)
 
@@ -104,13 +113,23 @@ def solve_sucre(
 
     for iteration in range(max_iter):
 
-        Bc, Jc = compute_B_and_J(image=image, data=data, beta=betac, gamma=gammac, device=device)
+        Bc, Jc = compute_Bc_Jc(
+            data=data,
+            betac=betac,
+            gammac=gammac,
+            Xc_numerator_buffer=Xc_numerator_buffer,
+            Yc_numerator_buffer=Yc_numerator_buffer,
+            XYc_denominator_buffer=XYc_denominator_buffer,
+            Bc_numerator_buffer=Bc_numerator_buffer,
+            Bc_denominator_buffer=Bc_denominator_buffer,
+            device=device
+        )
 
         cursor = 0
-        for ui, vi, zi, Ii in iter_data(data, device=device):
+        for ui, vi, zi, Iic in iter_data(data, device=device):
             length = zi.shape[0]
             residuals[cursor: cursor + length] = (
-                    Ii - Jc[vi, ui] * torch.exp(-betac * zi) - Bc * (1 - torch.exp(-gammac * zi))
+                    Iic - Jc[vi, ui] * torch.exp(-betac * zi) - Bc * (1 - torch.exp(-gammac * zi))
             )
             jacobian[cursor: cursor + length, 0] = (zi * Jc[vi, ui] * torch.exp(-betac * zi))
             jacobian[cursor: cursor + length, 1] = (-zi * Bc * torch.exp(-gammac * zi))
@@ -128,7 +147,17 @@ def solve_sucre(
             break
         previous_cost = cost
 
-    Bc, Jc = compute_B_and_J(image=image, data=data, beta=betac, gamma=gammac, device=device)
+    Bc, Jc = compute_Bc_Jc(
+        data=data,
+        betac=betac,
+        gammac=gammac,
+        Xc_numerator_buffer=Xc_numerator_buffer,
+        Yc_numerator_buffer=Yc_numerator_buffer,
+        XYc_denominator_buffer=XYc_denominator_buffer,
+        Bc_numerator_buffer=Bc_numerator_buffer,
+        Bc_denominator_buffer=Bc_denominator_buffer,
+        device=device
+    )
     print(f'Bc: {Bc.item()}\nbetac: {betac.item()}\ngammac: {gammac.item()}')
     return Jc.cpu(), Bc.item(), betac.item(), gammac.item()
 
