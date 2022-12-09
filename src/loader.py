@@ -32,20 +32,10 @@ from colmap.scripts.python import read_write_model
 
 
 class MatchesFile:
-    def __init__(self, path: Path, overwrite: bool = True, colmap_model: sfm.COLMAPModel = None):
-        self.path = path
-        self.size: int = 0
-        self.images: list[sfm.Image] = []
-
+    def __init__(self, path: Path, overwrite: bool = True):
         if overwrite:
             path.unlink(missing_ok=True)
-        elif path.exists():
-            if colmap_model is None:
-                raise ValueError('`colmap_model` must be specified if overwrite is False and the matches file exists.')
-            with h5py.File(path, 'r', libver='latest') as f:
-                for group_name, group in f.items():
-                    self.size += group['z'].shape[0]
-                    self.images.append(colmap_model[group_name])
+        self.path = path
 
     def save_matches(self, matches: sfm.Matches):
         with h5py.File(self.path, 'a', libver='latest') as f:
@@ -56,13 +46,13 @@ class MatchesFile:
             group.create_dataset('v2', data=matches.v2.short().cpu().numpy())
             group.create_dataset('z', data=np.full(len(matches), np.nan, dtype=np.float32))
             group.create_dataset('I', data=np.full((3, len(matches)), np.nan, dtype=np.float32))
-        self.size += len(matches)
-        self.images.append(matches.image2)
 
-    def prepare_matches(self, num_workers: int = 0, device: str = 'cpu'):
+    def prepare_matches(self, colmap_model: sfm.COLMAPModel, num_workers: int = 0, device: str = 'cpu'):
+        with h5py.File(self.path, 'r', libver='latest') as f:
+            image_list = [colmap_model[group_name] for group_name in f.keys()]
         with h5py.File(self.path, 'r+', libver='latest') as f:
-            for image_idx, image_image, image_depth in tqdm.tqdm(load_images(self.images, num_workers=num_workers)):
-                image = self.images[image_idx]
+            for image_idx, image_image, image_depth in tqdm.tqdm(load_images(image_list, num_workers=num_workers)):
+                image = image_list[image_idx]
                 image_distance = image.distance_map(image_depth.to(device))
                 group = f[image.name]
                 u2 = torch.tensor(group['u2'][()], dtype=torch.int64)
@@ -73,8 +63,7 @@ class MatchesFile:
     def load_channel(self, channel: int, pin_memory: bool = False) -> list[tuple[Tensor, Tensor, Tensor, Tensor]]:
         data = []
         with h5py.File(self.path, 'r', libver='latest') as f:
-            for image in self.images:
-                group = f[image.name]
+            for group in f.values():
                 if pin_memory:
                     data.append((
                         torch.tensor(group['u1'][()]).pin_memory(),
@@ -92,7 +81,12 @@ class MatchesFile:
         return data
 
     def __len__(self) -> int:
-        return self.size
+        size = 0
+        if self.path.exists():
+            with h5py.File(self.path, 'r', libver='latest') as f:
+                for group in f.values():
+                    size += group['z'].shape[0]
+        return size
 
 
 class ImageDataset(Dataset):

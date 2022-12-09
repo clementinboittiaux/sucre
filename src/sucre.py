@@ -155,7 +155,7 @@ def sucre(
         image_list = [im for im in image_list if im.name not in filter_image_names]
 
     matches_path = (output_dir / image_name).with_suffix('.h5')
-    matches_file = loader.MatchesFile(matches_path, overwrite=force_compute_matches, colmap_model=colmap_model)
+    matches_file = loader.MatchesFile(matches_path, overwrite=force_compute_matches)
 
     if force_compute_matches or not matches_path.exists():
         print(f'Compute {image_name} matches.')
@@ -167,7 +167,7 @@ def sucre(
             device=device
         )
         print('Prepare matches for optimization.')
-        matches_file.prepare_matches(num_workers=num_workers, device=device)
+        matches_file.prepare_matches(colmap_model=colmap_model, num_workers=num_workers, device=device)
 
     J = torch.full((image.camera.height, image.camera.width, 3), torch.nan, dtype=torch.float32)
     for channel in range(3):
