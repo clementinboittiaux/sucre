@@ -142,9 +142,10 @@ def sucre(
         filter_image_names: list[str] = None,
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
+        force_compute_matches: bool = False,
+        keep_matches: bool = False,
         num_workers: int = 0,
-        device: str = 'cpu',
-        keep_matches: bool = False
+        device: str = 'cpu'
 ):
     image = colmap_model[image_name]
     image_list = list(colmap_model.images.values())
@@ -153,19 +154,20 @@ def sucre(
     if filter_image_names is not None:
         image_list = [im for im in image_list if im.name not in filter_image_names]
 
-    print(f'Compute {image_name} matches.')
     matches_path = (output_dir / image_name).with_suffix('.h5')
-    matches_file = loader.MatchesFile(matches_path)
-    image.match_images(
-        image_list=image_list,
-        matches_file=matches_file,
-        min_cover=min_cover,
-        num_workers=num_workers,
-        device=device
-    )
+    matches_file = loader.MatchesFile(matches_path, overwrite=force_compute_matches, colmap_model=colmap_model)
 
-    print('Prepare matches for optimization.')
-    matches_file.prepare_matches(num_workers=num_workers, device=device)
+    if force_compute_matches or not matches_path.exists():
+        print(f'Compute {image_name} matches.')
+        image.match_images(
+            image_list=image_list,
+            matches_file=matches_file,
+            min_cover=min_cover,
+            num_workers=num_workers,
+            device=device
+        )
+        print('Prepare matches for optimization.')
+        matches_file.prepare_matches(num_workers=num_workers, device=device)
 
     J = torch.full((image.camera.height, image.camera.width, 3), torch.nan, dtype=torch.float32)
     for channel in range(3):
@@ -187,7 +189,7 @@ def sucre(
     ).save((output_dir / image_name).with_suffix('.png'))
 
     if not keep_matches:
-        print(f'Deleting {matches_path}.')
+        print(f'Erase {matches_path}.')
         matches_path.unlink()
 
 
@@ -216,9 +218,10 @@ def parse_args(args: argparse.Namespace):
             filter_image_names=filter_image_names,
             max_iter=args.max_iter,
             function_tolerance=args.function_tolerance,
+            force_compute_matches=args.force_compute_matches,
+            keep_matches=args.keep_matches,
             num_workers=args.num_workers,
-            device=args.device,
-            keep_matches=args.keep_matches
+            device=args.device
         )
 
 
@@ -243,8 +246,10 @@ if __name__ == '__main__':
     parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
     parser.add_argument('--function-tolerance', type=float, default=1e-5,
                         help='stops optimization if cost function change is below this threshold.')
+    parser.add_argument('--force-compute-matches', action='store_true',
+                        help='if matches file already exist, erase it and recompute matches.')
+    parser.add_argument('--keep-matches', action='store_true', help='keep matches file (can take a lot a space).')
     parser.add_argument('--num-workers', type=int, default=0, help='number of threads, 0 is the main thread.')
     parser.add_argument('--device', type=str, default='cpu', help='device for heavy computation.')
-    parser.add_argument('--keep-matches', action='store_true', help='keep matches files (can take a lot a space).')
 
     parse_args(parser.parse_args())

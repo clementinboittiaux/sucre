@@ -32,11 +32,20 @@ from colmap.scripts.python import read_write_model
 
 
 class MatchesFile:
-    def __init__(self, path: Path):
-        path.unlink(missing_ok=True)
+    def __init__(self, path: Path, overwrite: bool = True, colmap_model: sfm.COLMAPModel = None):
         self.path = path
         self.size: int = 0
         self.images: list[sfm.Image] = []
+
+        if overwrite:
+            path.unlink(missing_ok=True)
+        elif path.exists():
+            if colmap_model is None:
+                raise ValueError('`colmap_model` must be specified if overwrite is False and the matches file exists.')
+            with h5py.File(path, 'r', libver='latest') as f:
+                for group_name, group in f.items():
+                    self.size += group['z'].shape[0]
+                    self.images.append(colmap_model[group_name])
 
     def save_matches(self, matches: sfm.Matches):
         with h5py.File(self.path, 'a', libver='latest') as f:
@@ -55,34 +64,34 @@ class MatchesFile:
             for image_idx, image_image, image_depth in tqdm.tqdm(load_images(self.images, num_workers=num_workers)):
                 image = self.images[image_idx]
                 image_distance = image.distance_map(image_depth.to(device))
-                dataset = f[image.name]
-                u2 = torch.tensor(dataset['u2'][()], dtype=torch.int64)
-                v2 = torch.tensor(dataset['v2'][()], dtype=torch.int64)
-                dataset['z'][()] = image_distance[v2, u2].cpu().numpy()
-                dataset['I'][()] = image_image[v2, u2].T.numpy()
+                group = f[image.name]
+                u2 = torch.tensor(group['u2'][()], dtype=torch.int64)
+                v2 = torch.tensor(group['v2'][()], dtype=torch.int64)
+                group['z'][()] = image_distance[v2, u2].cpu().numpy()
+                group['I'][()] = image_image[v2, u2].T.numpy()
 
     def load_channel(self, channel: int, pin_memory: bool = False) -> list[tuple[Tensor, Tensor, Tensor, Tensor]]:
         data = []
         with h5py.File(self.path, 'r', libver='latest') as f:
             for image in self.images:
-                dataset = f[image.name]
+                group = f[image.name]
                 if pin_memory:
                     data.append((
-                        torch.tensor(dataset['u1'][()]).pin_memory(),
-                        torch.tensor(dataset['v1'][()]).pin_memory(),
-                        torch.tensor(dataset['z'][()]).pin_memory(),
-                        torch.tensor(dataset['I'][channel]).pin_memory()
+                        torch.tensor(group['u1'][()]).pin_memory(),
+                        torch.tensor(group['v1'][()]).pin_memory(),
+                        torch.tensor(group['z'][()]).pin_memory(),
+                        torch.tensor(group['I'][channel]).pin_memory()
                     ))
                 else:
                     data.append((
-                        torch.tensor(dataset['u1'][()]),
-                        torch.tensor(dataset['v1'][()]),
-                        torch.tensor(dataset['z'][()]),
-                        torch.tensor(dataset['I'][channel])
+                        torch.tensor(group['u1'][()]),
+                        torch.tensor(group['v1'][()]),
+                        torch.tensor(group['z'][()]),
+                        torch.tensor(group['I'][channel])
                     ))
         return data
 
-    def __len__(self):
+    def __len__(self) -> int:
         return self.size
 
 
