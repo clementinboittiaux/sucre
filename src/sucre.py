@@ -108,6 +108,7 @@ def solve_sucre(
     Bc, betac, gammac = initialize_sucre_parameters(image, matches_file, channel, mode=init, device=device)
     # TODO: simplex solver
     # TODO: analyse du puit de convergence de la fonction
+    # TODO: filter matches by distance
     print(f'Bc: {Bc}\nbetac: {betac}\ngammac: {gammac}')
 
     data = matches_file.load_channel(channel, pin_memory=device.lower() != 'cpu')
