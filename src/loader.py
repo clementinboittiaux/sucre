@@ -32,7 +32,7 @@ from colmap.scripts.python import read_write_model
 
 
 class MatchesFile:
-    def __init__(self, path: Path, overwrite: bool = True):
+    def __init__(self, path: Path, overwrite: bool = False):
         if overwrite:
             path.unlink(missing_ok=True)
         self.path = path
@@ -79,6 +79,18 @@ class MatchesFile:
                         torch.tensor(group['I'][channel])
                     ))
         return data
+
+    def load_Ic_z(self, channel: int, device: str = 'cpu') -> tuple[Tensor, Tensor]:
+        z = torch.zeros(len(self), dtype=torch.float32, device=device)
+        Ic = torch.zeros_like(z)
+        with h5py.File(self.path, 'r', libver='latest') as f:
+            cursor = 0
+            for group in f.values():
+                length = group['z'].shape[0]
+                z[cursor: cursor + length] = torch.tensor(group['z'][()], device=device)
+                Ic[cursor: cursor + length] = torch.tensor(group['I'][channel], device=device)
+                cursor += length
+        return Ic, z
 
     def __len__(self) -> int:
         size = 0

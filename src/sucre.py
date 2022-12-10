@@ -31,11 +31,26 @@ import normalization
 import sfm
 
 
-def initialize_sucre_parameters(image: sfm.Image, channel: int, device: str = 'cpu') -> tuple[float, float, float]:
-    Ic = loader.load_image(image.image_path)[:, :, channel].to(device)
-    z = image.distance_map(loader.load_depth(image.depth_path).to(device))
-    args_valid = z > 0
-    Bc, betac, gammac = gaussian_seathru.solve_gaussian_seathru(Ic[args_valid], z[args_valid], linear_beta=True)
+def initialize_sucre_parameters(
+        image: sfm.Image,
+        matches_file: loader.MatchesFile,
+        channel: int,
+        mode: str = 'fast',
+        device: str = 'cpu'
+) -> tuple[float, float, float]:
+    print(f'Initialize parameters with Gaussian Sea-thru ({mode} mode).')
+    match mode:
+        case 'fast':
+            Ic = loader.load_image(image.image_path)[:, :, channel].to(device)
+            z = image.distance_map(loader.load_depth(image.depth_path).to(device))
+            args_valid = z > 0
+            Bc, betac, gammac = gaussian_seathru.solve_gaussian_seathru(Ic[args_valid], z[args_valid], linear_beta=True)
+        case 'dense':
+            Bc, betac, gammac = gaussian_seathru.solve_gaussian_seathru(
+                *matches_file.load_Ic_z(channel, device=device), linear_beta=True
+            )
+        case _:
+            raise ValueError("only 'fast' and 'dense' are supported for `mode`.")
     return Bc, betac, gammac
 
 
@@ -85,12 +100,14 @@ def solve_sucre(
         image: sfm.Image,
         channel: int,
         matches_file: loader.MatchesFile,
+        init: str = 'fast',
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
         device: str = 'cpu'
 ):
-    print('Initialize parameters with Gaussian Sea-thru.')
-    Bc, betac, gammac = initialize_sucre_parameters(image, channel=channel, device=device)
+    Bc, betac, gammac = initialize_sucre_parameters(image, matches_file, channel, mode=init, device=device)
+    # TODO: simplex solver
+    # TODO: analyse du puit de convergence de la fonction
     print(f'Bc: {Bc}\nbetac: {betac}\ngammac: {gammac}')
 
     data = matches_file.load_channel(channel, pin_memory=device.lower() != 'cpu')
@@ -140,6 +157,7 @@ def sucre(
         output_dir: Path,
         min_cover: float,
         filter_image_names: list[str] = None,
+        init: str = 'fast',
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
         force_compute_matches: bool = False,
@@ -169,6 +187,8 @@ def sucre(
         print('Prepare matches for optimization.')
         matches_file.prepare_matches(colmap_model=colmap_model, num_workers=num_workers, device=device)
 
+    print(f'Total of {len(matches_file)} observations.')
+
     J = torch.full((image.camera.height, image.camera.width, 3), torch.nan, dtype=torch.float32)
     for channel in range(3):
         print(f'----------------------{["---", "-----", "----"][channel]}---------')
@@ -178,6 +198,7 @@ def sucre(
             image=image,
             channel=channel,
             matches_file=matches_file,
+            init=init,
             max_iter=max_iter,
             function_tolerance=function_tolerance,
             device=device
@@ -216,6 +237,7 @@ def parse_args(args: argparse.Namespace):
             output_dir=args.output_dir,
             min_cover=args.min_cover,
             filter_image_names=filter_image_names,
+            init=args.initialization,
             max_iter=args.max_iter,
             function_tolerance=args.function_tolerance,
             force_compute_matches=args.force_compute_matches,
@@ -243,6 +265,8 @@ if __name__ == '__main__':
     parser.add_argument('--filter-images-path', type=Path,
                         help='path to a .txt file with names of images to '
                              'discard when computing matches, one name per line.')
+    parser.add_argument('--initialization', type=str, choices=['fast', 'dense'], default='fast',
+                        help='initialize parameters with Gaussian Sea-thru on one image (fast) or all matches (dense).')
     parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
     parser.add_argument('--function-tolerance', type=float, default=1e-5,
                         help='stops optimization if cost function change is below this threshold.')
