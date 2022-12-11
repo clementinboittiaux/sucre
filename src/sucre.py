@@ -33,11 +33,12 @@ import sfm
 
 def initialize_sucre_parameters(
         image: sfm.Image,
+        data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
         matches_file: loader.MatchesFile,
         channel: int,
         mode: str = 'fast',
         device: str = 'cpu'
-) -> tuple[float, float, float]:
+) -> tuple[Tensor, float, float, float]:
     print(f'Initialize parameters with Gaussian Sea-thru ({mode} mode).')
     match mode:
         case 'fast':
@@ -45,13 +46,17 @@ def initialize_sucre_parameters(
             z = image.distance_map(loader.load_depth(image.depth_path).to(device))
             args_valid = z > 0
             Bc, betac, gammac = gaussian_seathru.solve_gaussian_seathru(Ic[args_valid], z[args_valid], linear_beta=True)
+            Jc = torch.full((image.camera.height, image.camera.width), torch.nan, dtype=torch.float32, device=device)
+            Jc[args_valid] = gaussian_seathru.compute_J(Ic[args_valid], z[args_valid], Bc, betac, gammac)
         case 'dense':
             Bc, betac, gammac = gaussian_seathru.solve_gaussian_seathru(
                 *matches_file.load_Ic_z(channel, device=device), linear_beta=True
             )
+            Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
+            Bc = Bc.item()
         case _:
             raise ValueError("only 'fast' and 'dense' are supported for `mode`.")
-    return Bc, betac, gammac
+    return Jc.cpu(), Bc, betac, gammac
 
 
 def iter_data(data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
@@ -63,8 +68,8 @@ def iter_data(data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
 def compute_Bc_Jc(
         image: sfm.Image,
         data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
-        betac: Tensor,
-        gammac: Tensor,
+        betac: Tensor | float,
+        gammac: Tensor | float,
         device: str = 'cpu'
 ) -> tuple[Tensor, Tensor]:
     Xc_numerator = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
@@ -96,26 +101,19 @@ def compute_Bc_Jc(
     return Bc, Jc
 
 
-def solve_sucre(
+def gauss_newton(
         image: sfm.Image,
-        channel: int,
+        data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
         matches_file: loader.MatchesFile,
-        init: str = 'fast',
+        betac_init: float,
+        gammac_init: float,
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
         device: str = 'cpu'
-):
-    Bc, betac, gammac = initialize_sucre_parameters(image, matches_file, channel, mode=init, device=device)
-    # TODO: simplex solver
-    # TODO: analyse du puit de convergence de la fonction
-    # TODO: filter matches by distance
-    print(f'Bc: {Bc}\nbetac: {betac}\ngammac: {gammac}')
-
-    data = matches_file.load_channel(channel, pin_memory=device.lower() != 'cpu')
-
+) -> tuple[Tensor, float, float, float]:
     print(f'Optimize Jc, Bc, betac and gammac in a Gauss-Newton scheme ({max_iter} maximum iterations).')
-    betac = torch.tensor(betac, dtype=torch.float32, device=device)
-    gammac = torch.tensor(gammac, dtype=torch.float32, device=device)
+    betac = torch.tensor(betac_init, dtype=torch.float32, device=device)
+    gammac = torch.tensor(gammac_init, dtype=torch.float32, device=device)
     residuals = torch.zeros(len(matches_file), dtype=torch.float32, device=device)
     jacobian = torch.zeros(len(matches_file), 2, dtype=torch.float32, device=device)
 
@@ -148,8 +146,102 @@ def solve_sucre(
         previous_cost = cost
 
     Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
-    print(f'Bc: {Bc.item()}\nbetac: {betac.item()}\ngammac: {gammac.item()}')
     return Jc.cpu(), Bc.item(), betac.item(), gammac.item()
+
+
+def adam(
+        data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
+        matches_file: loader.MatchesFile,
+        Jc_init: Tensor,
+        Bc_init: float,
+        betac_init: float,
+        gammac_init: float,
+        num_iter: int = 200,
+        device: str = 'cpu'
+) -> tuple[Tensor, float, float, float]:
+    print(f'Optimize Jc, Bc, betac and gammac with Adam optimizer ({num_iter} iterations).')
+    Jc = torch.nn.Parameter(Jc_init.to(device))
+    Bc = torch.nn.Parameter(torch.tensor(Bc_init, dtype=torch.float32, device=device))
+    betac = torch.nn.Parameter(torch.tensor(betac_init, dtype=torch.float32, device=device))
+    gammac = torch.nn.Parameter(torch.tensor(gammac_init, dtype=torch.float32, device=device))
+
+    optimizer = torch.optim.Adam([Jc, Bc, betac, gammac], lr=0.1)
+
+    size = len(matches_file)
+
+    for iteration in range(num_iter):
+
+        cost = 0
+        optimizer.zero_grad()
+
+        for ui, vi, zi, Iic in iter_data(data, device=device):
+            loss = torch.square(Iic - Jc[vi, ui] * torch.exp(-betac * zi) - Bc * torch.exp(-gammac * zi)).sum()
+            (loss / size).backward()
+            cost += loss.item()
+
+        optimizer.step()
+
+        print(f'iter: {iteration:04d}, cost: {cost:.8e}, '
+              f'Bc: {Bc.item():.3e}, betac: {betac.item():.3e}, gammac: {gammac.item():.3e}')
+
+    return Jc.detach().cpu(), Bc.item(), betac.item(), gammac.item()
+
+
+def solve_sucre(
+        image: sfm.Image,
+        channel: int,
+        matches_file: loader.MatchesFile,
+        init: str = 'fast',
+        solver: str = 'gauss-newton',
+        max_iter: int = 200,
+        function_tolerance: float = 1e-5,
+        device: str = 'cpu'
+) -> tuple[Tensor, float, float, float]:
+    data = matches_file.load_channel(channel, pin_memory=device.lower() != 'cpu')
+    Jc, Bc, betac, gammac = initialize_sucre_parameters(
+        image=image, data=data, matches_file=matches_file, channel=channel, mode=init, device=device
+    )
+    print(f'Bc: {Bc}, betac: {betac}, gammac: {gammac}')
+
+    # TODO: simplex solver
+    # TODO: filter matches by distance
+
+    if max_iter == 0:
+        if init == 'fast':
+            Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
+            Bc = Bc.item()
+            Jc = Jc.cpu()
+    else:
+        match solver:
+            case 'gauss-newton':
+                Jc, Bc, betac, gammac = gauss_newton(
+                    image=image,
+                    data=data,
+                    matches_file=matches_file,
+                    betac_init=betac,
+                    gammac_init=gammac,
+                    max_iter=max_iter,
+                    function_tolerance=function_tolerance,
+                    device=device
+                )
+            case 'simplex':
+                pass
+            case 'adam':
+                Jc, Bc, betac, gammac = adam(
+                    data=data,
+                    matches_file=matches_file,
+                    Jc_init=Jc,
+                    Bc_init=Bc,
+                    betac_init=betac,
+                    gammac_init=gammac,
+                    num_iter=max_iter,
+                    device=device
+                )
+            case _:
+                raise ValueError("`method` support 'gauss-newton', 'simplex' or 'adam'")
+
+    print(f'Bc: {Bc}, betac: {betac}, gammac: {gammac}')
+    return Jc, Bc, betac, gammac
 
 
 def sucre(
@@ -159,6 +251,7 @@ def sucre(
         min_cover: float,
         filter_image_names: list[str] = None,
         init: str = 'fast',
+        solver: str = 'gauss-newton',
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
         force_compute_matches: bool = False,
@@ -200,6 +293,7 @@ def sucre(
             channel=channel,
             matches_file=matches_file,
             init=init,
+            solver=solver,
             max_iter=max_iter,
             function_tolerance=function_tolerance,
             device=device
@@ -239,6 +333,7 @@ def parse_args(args: argparse.Namespace):
             min_cover=args.min_cover,
             filter_image_names=filter_image_names,
             init=args.initialization,
+            solver=args.solver,
             max_iter=args.max_iter,
             function_tolerance=args.function_tolerance,
             force_compute_matches=args.force_compute_matches,
@@ -268,6 +363,8 @@ if __name__ == '__main__':
                              'discard when computing matches, one name per line.')
     parser.add_argument('--initialization', type=str, choices=['fast', 'dense'], default='fast',
                         help='initialize parameters with Gaussian Sea-thru on one image (fast) or all matches (dense).')
+    parser.add_argument('--solver', type=str, choices=['gauss-newton', 'simplex', 'adam'], default='gauss-newton',
+                        help='method to solve SUCRe least squares.')
     parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
     parser.add_argument('--function-tolerance', type=float, default=1e-5,
                         help='stops optimization if cost function change is below this threshold.')
