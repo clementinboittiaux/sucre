@@ -151,7 +151,6 @@ def gauss_newton(
 
 def adam(
         data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
-        matches_file: loader.MatchesFile,
         Jc_init: Tensor,
         Bc_init: float,
         betac_init: float,
@@ -165,9 +164,9 @@ def adam(
     betac = torch.nn.Parameter(torch.tensor(betac_init, dtype=torch.float32, device=device))
     gammac = torch.nn.Parameter(torch.tensor(gammac_init, dtype=torch.float32, device=device))
 
-    optimizer = torch.optim.Adam([Jc, Bc, betac, gammac], lr=0.1)
+    optimizer = torch.optim.Adam([Jc, Bc, betac, gammac], lr=0.01)
 
-    size = len(matches_file)
+    previous_cost = np.inf
 
     for iteration in range(num_iter):
 
@@ -175,14 +174,19 @@ def adam(
         optimizer.zero_grad()
 
         for ui, vi, zi, Iic in iter_data(data, device=device):
-            loss = torch.square(Iic - Jc[vi, ui] * torch.exp(-betac * zi) - Bc * torch.exp(-gammac * zi)).sum()
-            (loss / size).backward()
+            loss = torch.nn.functional.mse_loss(
+                Jc[vi, ui] * torch.exp(-betac * zi) + Bc * (1 - torch.exp(-gammac * zi)),
+                Iic
+            )  # all images have the same weight in the optimization, regardless of their number of observations
+            loss.backward()
             cost += loss.item()
 
         optimizer.step()
+        cost_change = np.abs(previous_cost - cost) / cost
 
-        print(f'iter: {iteration:04d}, cost: {cost:.8e}, '
+        print(f'iter: {iteration:04d}, cost: {cost:.8e}, cost change: {cost_change:.8e}, '
               f'Bc: {Bc.item():.3e}, betac: {betac.item():.3e}, gammac: {gammac.item():.3e}')
+        previous_cost = cost
 
     return Jc.detach().cpu(), Bc.item(), betac.item(), gammac.item()
 
@@ -229,7 +233,6 @@ def solve_sucre(
             case 'adam':
                 Jc, Bc, betac, gammac = adam(
                     data=data,
-                    matches_file=matches_file,
                     Jc_init=Jc,
                     Bc_init=Bc,
                     betac_init=betac,
