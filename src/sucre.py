@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import yaml
 from PIL import Image
 from scipy.optimize import minimize
 from torch import Tensor
@@ -158,7 +159,7 @@ def simplex(
         max_iter: int = 200,
         device: str = 'cpu'
 ) -> tuple[Tensor, float, float, float]:
-    print(f'Optimize Jc, Bc, betac and gammac with Nelder-Mead simplex method ({max_iter} maximum iterations).')
+    print(f'Optimize Jc, Bc, betac and gammac with Nelder-Mead simplex algorithm ({max_iter} maximum iterations).')
 
     def residuals(x):
         betac_hat, gammac_hat = x.tolist()
@@ -328,11 +329,14 @@ def sucre(
     print(f'Total of {len(matches_file)} observations.')
 
     J = torch.full((image.camera.height, image.camera.width, 3), torch.nan, dtype=torch.float32)
+    B = torch.full((3,), torch.nan, dtype=torch.float32)
+    beta = torch.full((3,), torch.nan, dtype=torch.float32)
+    gamma = torch.full((3,), torch.nan, dtype=torch.float32)
     for channel in range(3):
         print(f'----------------------{["---", "-----", "----"][channel]}---------')
         print(f'SUCRe optimization on {["red", "green", "blue"][channel]} channel.')
         print(f'----------------------{["---", "-----", "----"][channel]}---------')
-        J[:, :, channel], Bc, betac, gammac = solve_sucre(
+        J[:, :, channel], B[channel], beta[channel], gamma[channel] = solve_sucre(
             image=image,
             channel=channel,
             matches_file=matches_file,
@@ -347,6 +351,9 @@ def sucre(
     Image.fromarray(
         np.uint8(normalization.histogram_stretching(J) * 255)
     ).save((output_dir / image_name).with_suffix('.png'))
+    torch.save(J, (output_dir / image_name).with_suffix('.pt'))
+    with open((output_dir / image_name).with_suffix('.yml'), 'w') as yaml_file:
+        yaml.dump({'B': B.tolist(), 'beta': beta.tolist(), 'gamma': gamma.tolist()}, yaml_file)
 
     if not keep_matches:
         print(f'Erase {matches_path}.')
