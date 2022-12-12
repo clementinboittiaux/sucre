@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
+from scipy.optimize import minimize
 from torch import Tensor
 
 import gaussian_seathru
@@ -149,6 +150,38 @@ def gauss_newton(
     return Jc.cpu(), Bc.item(), betac.item(), gammac.item()
 
 
+def simplex(
+        image: sfm.Image,
+        data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
+        betac_init: float,
+        gammac_init: float,
+        max_iter: int = 200,
+        device: str = 'cpu'
+) -> tuple[Tensor, float, float, float]:
+    print(f'Optimize Jc, Bc, betac and gammac with Nelder-Mead simplex method ({max_iter} maximum iterations).')
+
+    def residuals(x):
+        betac_hat, gammac_hat = x.tolist()
+        Bc_hat, Jc_hat = compute_Bc_Jc(image=image, data=data, betac=betac_hat, gammac=gammac_hat, device=device)
+        cost = torch.tensor(0.0, dtype=torch.float32, device=device)
+        for ui, vi, zi, Iic in iter_data(data, device=device):
+            cost += torch.square(
+                Iic - Jc_hat[vi, ui] * torch.exp(-betac_hat * zi) - Bc_hat * (1 - torch.exp(-gammac_hat * zi))
+            ).sum()
+        return cost.item()
+
+    betac, gammac = minimize(
+        residuals,
+        np.array([betac_init, gammac_init]),
+        method='Nelder-Mead',
+        bounds=[(0, np.inf)] * 2,
+        options={'maxiter': max_iter, 'disp': True}
+    ).x.tolist()
+    Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
+
+    return Jc.cpu(), Bc.item(), betac, gammac
+
+
 def adam(
         data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
         matches_file: loader.MatchesFile,
@@ -208,7 +241,6 @@ def solve_sucre(
     )
     print(f'Bc: {Bc}, betac: {betac}, gammac: {gammac}')
 
-    # TODO: simplex solver
     # TODO: filter matches by distance
 
     if max_iter == 0:
@@ -230,7 +262,14 @@ def solve_sucre(
                     device=device
                 )
             case 'simplex':
-                pass
+                Jc, Bc, betac, gammac = simplex(
+                    image=image,
+                    data=data,
+                    betac_init=betac,
+                    gammac_init=gammac,
+                    max_iter=max_iter,
+                    device=device
+                )
             case 'adam':
                 Jc, Bc, betac, gammac = adam(
                     data=data,
