@@ -383,11 +383,11 @@ def parse_args(args: argparse.Namespace):
 
     if args.image_name is not None:
         image_names = [args.image_name]
-    elif args.image_list_path is not None:
-        image_names = args.image_list_path.read_text().splitlines()
+    elif args.image_list is not None:
+        image_names = args.image_list.read_text().splitlines()
     else:
         image_names = []
-        for image_id in range(args.image_id_range[0], args.image_id_range[1] + 1):
+        for image_id in range(args.image_ids[0], args.image_ids[1] + 1):
             if image_id in colmap_model.images:
                 image_names.append(colmap_model.images[image_id].name)
 
