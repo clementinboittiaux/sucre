@@ -140,6 +140,13 @@ def gauss_newton(
         gammac -= delta[1]
 
         cost = torch.square(residuals).sum()
+
+        if cost.isnan():
+            print('WARNING: cost function diverged, revert to initial parameters.')
+            betac = torch.tensor(betac_init, dtype=torch.float32, device=device)
+            gammac = torch.tensor(gammac_init, dtype=torch.float32, device=device)
+            break
+
         cost_change = torch.abs(previous_cost - cost) / cost
         print(f'iter: {iteration:04d}, cost: {cost.item():.8e}, cost change: {cost_change.item():.8e}, '
               f'Bc: {Bc.item():.3e}, betac: {betac.item():.3e}, gammac: {gammac.item():.3e}')
