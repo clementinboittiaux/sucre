@@ -151,30 +151,42 @@ def gauss_newton(
     return Jc.cpu(), Bc.item(), betac.item(), gammac.item()
 
 
-def simplex(
+def scipy_minimize(
         image: sfm.Image,
         data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
+        matches_file: loader.MatchesFile,
         betac_init: float,
         gammac_init: float,
+        solver: str = 'l-bfgs-b',
         max_iter: int = 200,
         device: str = 'cpu'
 ) -> tuple[Tensor, float, float, float]:
-    print(f'Optimize Jc, Bc, betac and gammac with Nelder-Mead simplex algorithm ({max_iter} maximum iterations).')
+    if solver not in ['l-bfgs-b', 'simplex']:
+        raise ValueError("`solver` supports 'l-bfgs-b' or 'simplex'.")
+    print(f'Optimize Jc, Bc, betac and gammac with {solver} algorithm ({max_iter} maximum iterations).')
+
+    size = len(matches_file)
 
     def residuals(x):
         betac_hat, gammac_hat = x.tolist()
         Bc_hat, Jc_hat = compute_Bc_Jc(image=image, data=data, betac=betac_hat, gammac=gammac_hat, device=device)
-        cost = torch.tensor(0.0, dtype=torch.float32, device=device)
+        cost = torch.zeros(1, dtype=torch.float32, device=device)
+        jacobian = torch.zeros(2, dtype=torch.float32, device=device)
         for ui, vi, zi, Iic in iter_data(data, device=device):
-            cost += torch.square(
-                Iic - Jc_hat[vi, ui] * torch.exp(-betac_hat * zi) - Bc_hat * (1 - torch.exp(-gammac_hat * zi))
-            ).sum()
+            r = Iic - Jc_hat[vi, ui] * torch.exp(-betac_hat * zi) - Bc_hat * (1 - torch.exp(-gammac_hat * zi))
+            cost += torch.square(r).sum()
+            if solver == 'l-bfgs-b':
+                jacobian[0] += torch.sum(2 * r * Jc_hat[vi, ui] * zi * torch.exp(-betac_hat * zi))
+                jacobian[1] -= torch.sum(2 * r * Bc_hat * zi * torch.exp(-gammac_hat * zi))
+        if solver == 'l-bfgs-b':
+            return cost.item() / size, (jacobian / size).tolist()
         return cost.item()
 
     betac, gammac = minimize(
         residuals,
         np.array([betac_init, gammac_init]),
-        method='Nelder-Mead',
+        method='L-BFGS-B' if solver == 'l-bfgs-b' else 'Nelder-Mead',
+        jac=solver == 'l-bfgs-b',
         bounds=[(0, np.inf)] * 2,
         options={'maxiter': max_iter, 'disp': True}
     ).x.tolist()
@@ -243,6 +255,7 @@ def solve_sucre(
     print(f'Bc: {Bc}, betac: {betac}, gammac: {gammac}')
 
     # TODO: filter matches by distance
+    # TODO: harmonize cost across all solvers
 
     if max_iter == 0:
         if init == 'fast':
@@ -262,12 +275,14 @@ def solve_sucre(
                     function_tolerance=function_tolerance,
                     device=device
                 )
-            case 'simplex':
-                Jc, Bc, betac, gammac = simplex(
+            case 'l-bfgs-b' | 'simplex':
+                Jc, Bc, betac, gammac = scipy_minimize(
                     image=image,
                     data=data,
+                    matches_file=matches_file,
                     betac_init=betac,
                     gammac_init=gammac,
+                    solver=solver,
                     max_iter=max_iter,
                     device=device
                 )
@@ -283,7 +298,7 @@ def solve_sucre(
                     device=device
                 )
             case _:
-                raise ValueError("`method` support 'gauss-newton', 'simplex' or 'adam'")
+                raise ValueError("`method` supports 'gauss-newton', 'l-bfgs-b', 'simplex' or 'adam'")
 
     print(f'Bc: {Bc}, betac: {betac}, gammac: {gammac}')
     return Jc, Bc, betac, gammac
@@ -414,8 +429,8 @@ if __name__ == '__main__':
                              'discard when computing matches, one name per line.')
     parser.add_argument('--initialization', type=str, choices=['fast', 'dense'], default='fast',
                         help='initialize parameters with Gaussian Sea-thru on one image (fast) or all matches (dense).')
-    parser.add_argument('--solver', type=str, choices=['gauss-newton', 'simplex', 'adam'], default='gauss-newton',
-                        help='method to solve SUCRe least squares.')
+    parser.add_argument('--solver', type=str, choices=['gauss-newton', 'l-bfgs-b', 'simplex', 'adam'],
+                        default='gauss-newton', help='method to solve SUCRe least squares.')
     parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
     parser.add_argument('--function-tolerance', type=float, default=1e-5,
                         help='stops optimization if cost function change is below this threshold.')
