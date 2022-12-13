@@ -115,15 +115,17 @@ def solve_gaussian_seathru(Ic: Tensor, z: Tensor, linear_beta: bool = False) -> 
 
     if linear_beta:
         parameters_init = [0.25, 0.1, 0.1]  # Initial parameters if beta is linear
+        bounds = [(0, 1), (0, 5), (0, 5)]
     else:
         parameters_init = [0.25, 0.1, 0.1, 0.1, 0.1, 0.1]  # Initial parameters if beta is not linear
+        bounds = [(0, 1), (0, np.inf), (0, np.inf), (0, np.inf), (0, np.inf), (0, 5)]
 
     # Minimize the negative log likelihood using simplex algorithm
     parameters = minimize(
         residuals,
         np.array(parameters_init),
         method='Nelder-Mead',
-        bounds=[(0, np.inf)] * len(parameters_init),
+        bounds=bounds,
         options={'maxiter': 10000, 'disp': True}
     )
 

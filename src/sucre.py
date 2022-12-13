@@ -187,7 +187,7 @@ def scipy_minimize(
         np.array([betac_init, gammac_init]),
         method='L-BFGS-B' if solver == 'l-bfgs-b' else 'Nelder-Mead',
         jac=solver == 'l-bfgs-b',
-        bounds=[(0, np.inf)] * 2,
+        bounds=[(0, 5), (0, 5)],
         options={'maxiter': max_iter, 'disp': True}
     ).x.tolist()
     Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
@@ -427,7 +427,7 @@ if __name__ == '__main__':
     parser.add_argument('--filter-images-path', type=Path,
                         help='path to a .txt file with names of images to '
                              'discard when computing matches, one name per line.')
-    parser.add_argument('--initialization', type=str, choices=['fast', 'dense'], default='fast',
+    parser.add_argument('--initialization', type=str, choices=['fast', 'dense'], default='dense',
                         help='initialize parameters with Gaussian Sea-thru on one image (fast) or all matches (dense).')
     parser.add_argument('--solver', type=str, choices=['gauss-newton', 'l-bfgs-b', 'simplex', 'adam'],
                         default='gauss-newton', help='method to solve SUCRe least squares.')
