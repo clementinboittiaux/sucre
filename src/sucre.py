@@ -194,7 +194,7 @@ def scipy_minimize(
         np.array([betac_init, gammac_init]),
         method='L-BFGS-B' if solver == 'l-bfgs-b' else 'Nelder-Mead',
         jac=solver == 'l-bfgs-b',
-        bounds=[(0, 5), (0, 5)],
+        bounds=[(1e-8, 5), (1e-8, 5)],
         options={'maxiter': max_iter, 'disp': True}
     ).x.tolist()
     Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
