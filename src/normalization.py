@@ -3,7 +3,7 @@ from torch import Tensor
 
 
 def histogram_stretching(image: Tensor):
-    image = image.numpy()
+    image = image.numpy().copy()
     valid = np.all(~np.isnan(image), axis=2)
     image_valid = image[valid]
     image_valid = np.clip(image_valid, np.percentile(image_valid, 1, axis=0), np.percentile(image_valid, 99, axis=0))
