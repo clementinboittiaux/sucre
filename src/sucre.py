@@ -103,7 +103,7 @@ def compute_Bc_Jc(
     return Bc, Jc
 
 
-def gauss_newton(
+def levenberg_marquardt(
         image: sfm.Image,
         data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
         matches_file: loader.MatchesFile,
@@ -113,12 +113,14 @@ def gauss_newton(
         function_tolerance: float = 1e-5,
         device: str = 'cpu'
 ) -> tuple[Tensor, float, float, float]:
-    print(f'Optimize Jc, Bc, betac and gammac in a Gauss-Newton scheme ({max_iter} maximum iterations).')
+    print(f'Optimize Jc, Bc, betac and gammac in a Levenberg-Marquardt scheme ({max_iter} maximum iterations).')
     betac = torch.tensor(betac_init, dtype=torch.float32, device=device)
     gammac = torch.tensor(gammac_init, dtype=torch.float32, device=device)
     residuals = torch.zeros(len(matches_file), dtype=torch.float32, device=device)
     jacobian = torch.zeros(len(matches_file), 2, dtype=torch.float32, device=device)
 
+    damping = 0.1
+    eye = torch.eye(2, dtype=torch.float32, device=device)
     previous_cost = torch.inf
 
     for iteration in range(max_iter):
@@ -135,17 +137,21 @@ def gauss_newton(
             jacobian[cursor: cursor + length, 1] = (-zi * Bc * torch.exp(-gammac * zi))
             cursor += length
 
-        delta = torch.inverse(jacobian.T @ jacobian) @ (jacobian.T @ residuals)
+        delta = torch.inverse(jacobian.T @ jacobian + damping * eye) @ (jacobian.T @ residuals)
         betac -= delta[0]
         gammac -= delta[1]
 
         cost = torch.square(residuals).sum()
 
         cost_change = torch.abs(previous_cost - cost) / cost
-        print(f'iter: {iteration:04d}, cost: {cost.item():.8e}, cost change: {cost_change.item():.8e}, '
-              f'Bc: {Bc.item():.3e}, betac: {betac.item():.3e}, gammac: {gammac.item():.3e}')
+        print(f'iter: {iteration:04d}, cost: {cost.item():.8e}, cost change: {cost_change.item():.8e}, damping: '
+              f'{damping:.8e}, Bc: {Bc.item():.3e}, betac: {betac.item():.3e}, gammac: {gammac.item():.3e}')
         if cost_change < function_tolerance or cost.isnan():
             break
+        elif cost < previous_cost:
+            damping = max(damping / 10, 1e-32)
+        else:
+            damping *= 10
         previous_cost = cost
 
     Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
@@ -244,7 +250,7 @@ def solve_sucre(
         channel: int,
         matches_file: loader.MatchesFile,
         init: str = 'fast',
-        solver: str = 'gauss-newton',
+        solver: str = 'lm',
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
         device: str = 'cpu'
@@ -262,8 +268,8 @@ def solve_sucre(
 
     if max_iter > 0:
         match solver:
-            case 'gauss-newton':
-                Jc, Bc, betac, gammac = gauss_newton(
+            case 'lm':
+                Jc, Bc, betac, gammac = levenberg_marquardt(
                     image=image,
                     data=data,
                     matches_file=matches_file,
@@ -296,7 +302,7 @@ def solve_sucre(
                     device=device
                 )
             case _:
-                raise ValueError("`method` supports 'gauss-newton', 'l-bfgs-b', 'simplex' or 'adam'")
+                raise ValueError("`method` supports 'lm', 'l-bfgs-b', 'simplex' or 'adam'")
 
         if any([np.isnan(Bc), np.isnan(betac), np.isnan(gammac)]):
             print('WARNING: optimization diverged, revert to initial parameters.')
@@ -321,7 +327,7 @@ def sucre(
         min_cover: float,
         filter_image_names: list[str] = None,
         init: str = 'fast',
-        solver: str = 'gauss-newton',
+        solver: str = 'lm',
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
         force_compute_matches: bool = False,
@@ -439,8 +445,8 @@ if __name__ == '__main__':
                              'discard when computing matches, one name per line.')
     parser.add_argument('--initialization', type=str, choices=['fast', 'dense'], default='dense',
                         help='initialize parameters with Gaussian Sea-thru on one image (fast) or all matches (dense).')
-    parser.add_argument('--solver', type=str, choices=['gauss-newton', 'l-bfgs-b', 'simplex', 'adam'],
-                        default='gauss-newton', help='method to solve SUCRe least squares.')
+    parser.add_argument('--solver', type=str, choices=['lm', 'l-bfgs-b', 'simplex', 'adam'],
+                        default='lm', help='method to solve SUCRe least squares.')
     parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
     parser.add_argument('--function-tolerance', type=float, default=1e-5,
                         help='stops optimization if cost function change is below this threshold.')
