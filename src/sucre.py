@@ -141,16 +141,10 @@ def gauss_newton(
 
         cost = torch.square(residuals).sum()
 
-        if cost.isnan():
-            print('WARNING: cost function diverged, revert to initial parameters.')
-            betac = torch.tensor(betac_init, dtype=torch.float32, device=device)
-            gammac = torch.tensor(gammac_init, dtype=torch.float32, device=device)
-            break
-
         cost_change = torch.abs(previous_cost - cost) / cost
         print(f'iter: {iteration:04d}, cost: {cost.item():.8e}, cost change: {cost_change.item():.8e}, '
               f'Bc: {Bc.item():.3e}, betac: {betac.item():.3e}, gammac: {gammac.item():.3e}')
-        if cost_change < function_tolerance:
+        if cost_change < function_tolerance or cost.isnan():
             break
         previous_cost = cost
 
@@ -256,28 +250,25 @@ def solve_sucre(
         device: str = 'cpu'
 ) -> tuple[Tensor, float, float, float]:
     data = matches_file.load_channel(channel, pin_memory=device.lower() != 'cpu')
-    Jc, Bc, betac, gammac = initialize_sucre_parameters(
+    Jc_init, Bc_init, betac_init, gammac_init = initialize_sucre_parameters(
         image=image, data=data, matches_file=matches_file, channel=channel, mode=init, device=device
     )
-    print(f'Bc: {Bc}, betac: {betac}, gammac: {gammac}')
+    print(f'Bc: {Bc_init}, betac: {betac_init}, gammac: {gammac_init}')
+
+    diverged = False
 
     # TODO: filter matches by distance
     # TODO: harmonize cost across all solvers
 
-    if max_iter == 0:
-        if init == 'fast':
-            Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
-            Bc = Bc.item()
-            Jc = Jc.cpu()
-    else:
+    if max_iter > 0:
         match solver:
             case 'gauss-newton':
                 Jc, Bc, betac, gammac = gauss_newton(
                     image=image,
                     data=data,
                     matches_file=matches_file,
-                    betac_init=betac,
-                    gammac_init=gammac,
+                    betac_init=betac_init,
+                    gammac_init=gammac_init,
                     max_iter=max_iter,
                     function_tolerance=function_tolerance,
                     device=device
@@ -287,8 +278,8 @@ def solve_sucre(
                     image=image,
                     data=data,
                     matches_file=matches_file,
-                    betac_init=betac,
-                    gammac_init=gammac,
+                    betac_init=betac_init,
+                    gammac_init=gammac_init,
                     solver=solver,
                     max_iter=max_iter,
                     device=device
@@ -297,15 +288,27 @@ def solve_sucre(
                 Jc, Bc, betac, gammac = adam(
                     data=data,
                     matches_file=matches_file,
-                    Jc_init=Jc,
-                    Bc_init=Bc,
-                    betac_init=betac,
-                    gammac_init=gammac,
+                    Jc_init=Jc_init,
+                    Bc_init=Bc_init,
+                    betac_init=betac_init,
+                    gammac_init=gammac_init,
                     num_iter=max_iter,
                     device=device
                 )
             case _:
                 raise ValueError("`method` supports 'gauss-newton', 'l-bfgs-b', 'simplex' or 'adam'")
+
+        if any([np.isnan(Bc), np.isnan(betac), np.isnan(gammac)]):
+            print('WARNING: optimization diverged, revert to initial parameters.')
+            Jc, Bc, betac, gammac = Jc_init, Bc_init, betac_init, gammac_init
+            diverged = True
+    else:
+        Jc, Bc, betac, gammac = Jc_init, Bc_init, betac_init, gammac_init
+
+    if init == 'fast' and (diverged or max_iter <= 0):
+        Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
+        Bc = Bc.item()
+        Jc = Jc.cpu()
 
     print(f'Bc: {Bc}, betac: {betac}, gammac: {gammac}')
     return Jc, Bc, betac, gammac
