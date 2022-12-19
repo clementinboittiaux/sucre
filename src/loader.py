@@ -31,6 +31,42 @@ import sfm
 from colmap.scripts.python import read_write_model
 
 
+class Data:
+    def __init__(self):
+        self.data: list[dict[str, Tensor]] = []
+
+    def append(self, u: Tensor, v: Tensor, Ic: Tensor, z: Tensor):
+        self.data.append({
+            'u': u,
+            'v': v,
+            'Ic': Ic,
+            'z': z
+        })
+
+    def to_Ic_z(self, device: str = 'cpu') -> tuple[Tensor, Tensor]:
+        Ic = torch.full((len(self),), torch.nan, dtype=torch.float32, device=device)
+        z = torch.full((len(self),), torch.nan, dtype=torch.float32, device=device)
+        cursor = 0
+        for sample in self.data:
+            length = sample['Ic'].shape[0]
+            Ic[cursor: cursor + length] = sample['Ic'].to(device)
+            z[cursor: cursor + length] = sample['z'].to(device)
+            cursor += length
+        return Ic, z
+
+    def iter(self, device: str = 'cpu') -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        for sample in self.data:
+            yield (
+                sample['u'].to(device).long(),
+                sample['v'].to(device).long(),
+                sample['Ic'].to(device),
+                sample['z'].to(device)
+            )
+
+    def __len__(self):
+        return sum([sample['Ic'].shape[0] for sample in self.data])
+
+
 class MatchesFile:
     def __init__(self, path: Path, overwrite: bool = False):
         if overwrite:
@@ -60,37 +96,17 @@ class MatchesFile:
                 group['z'][()] = image_distance[v2, u2].cpu().numpy()
                 group['I'][()] = image_image[v2, u2].T.numpy()
 
-    def load_channel(self, channel: int, pin_memory: bool = False) -> list[tuple[Tensor, Tensor, Tensor, Tensor]]:
-        data = []
+    def load_channel(self, channel: int) -> Data:
+        data = Data()
         with h5py.File(self.path, 'r', libver='latest') as f:
             for group in f.values():
-                if pin_memory:
-                    data.append((
-                        torch.tensor(group['u1'][()]).pin_memory(),
-                        torch.tensor(group['v1'][()]).pin_memory(),
-                        torch.tensor(group['z'][()]).pin_memory(),
-                        torch.tensor(group['I'][channel]).pin_memory()
-                    ))
-                else:
-                    data.append((
-                        torch.tensor(group['u1'][()]),
-                        torch.tensor(group['v1'][()]),
-                        torch.tensor(group['z'][()]),
-                        torch.tensor(group['I'][channel])
-                    ))
+                data.append(
+                    u=torch.tensor(group['u1'][()]),
+                    v=torch.tensor(group['v1'][()]),
+                    Ic=torch.tensor(group['I'][channel]),
+                    z=torch.tensor(group['z'][()])
+                )
         return data
-
-    def load_Ic_z(self, channel: int, device: str = 'cpu') -> tuple[Tensor, Tensor]:
-        z = torch.zeros(len(self), dtype=torch.float32, device=device)
-        Ic = torch.zeros_like(z)
-        with h5py.File(self.path, 'r', libver='latest') as f:
-            cursor = 0
-            for group in f.values():
-                length = group['z'].shape[0]
-                z[cursor: cursor + length] = torch.tensor(group['z'][()], device=device)
-                Ic[cursor: cursor + length] = torch.tensor(group['I'][channel], device=device)
-                cursor += length
-        return Ic, z
 
     def __len__(self) -> int:
         size = 0

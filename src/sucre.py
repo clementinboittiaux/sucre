@@ -35,8 +35,7 @@ import sfm
 
 def initialize_sucre_parameters(
         image: sfm.Image,
-        data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
-        matches_file: loader.MatchesFile,
+        data: loader.Data,
         channel: int,
         mode: str = 'fast',
         device: str = 'cpu'
@@ -52,7 +51,7 @@ def initialize_sucre_parameters(
             Jc[args_valid] = gaussian_seathru.compute_J(Ic[args_valid], z[args_valid], Bc, betac, gammac)
         case 'dense':
             Bc, betac, gammac = gaussian_seathru.solve_gaussian_seathru(
-                *matches_file.load_Ic_z(channel, device=device), linear_beta=True
+                *data.to_Ic_z(device=device), linear_beta=True
             )
             Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
             Bc = Bc.item()
@@ -61,15 +60,9 @@ def initialize_sucre_parameters(
     return Jc.cpu(), Bc, betac, gammac
 
 
-def iter_data(data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
-              device: str = 'cpu') -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    for u, v, z, Ic in data:
-        yield u.to(device).long(), v.to(device).long(), z.to(device), Ic.to(device)
-
-
 def compute_Bc_Jc(
         image: sfm.Image,
-        data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
+        data: loader.Data,
         betac: Tensor | float,
         gammac: Tensor | float,
         device: str = 'cpu'
@@ -80,7 +73,7 @@ def compute_Bc_Jc(
     Bc_numerator = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
     Bc_denominator = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
 
-    for ui, vi, zi, Iic in iter_data(data, device=device):
+    for ui, vi, Iic, zi in data.iter(device=device):
         aic = torch.exp(-betac * zi)
         bic = 1 - torch.exp(-gammac * zi)
         Xc_numerator[vi, ui] += Iic * aic
@@ -90,7 +83,7 @@ def compute_Bc_Jc(
     Xc = Xc_numerator / XYc_denominator
     Yc = Yc_numerator / XYc_denominator
 
-    for ui, vi, zi, Iic in iter_data(data, device=device):
+    for ui, vi, Iic, zi in data.iter(device=device):
         aic = torch.exp(-betac * zi)
         bic = 1 - torch.exp(-gammac * zi)
         Mic = Iic - Xc[vi, ui] * aic
@@ -105,8 +98,7 @@ def compute_Bc_Jc(
 
 def levenberg_marquardt(
         image: sfm.Image,
-        data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
-        matches_file: loader.MatchesFile,
+        data: loader.Data,
         betac_init: float,
         gammac_init: float,
         max_iter: int = 200,
@@ -116,8 +108,8 @@ def levenberg_marquardt(
     print(f'Optimize Jc, Bc, betac and gammac in a Levenberg-Marquardt scheme ({max_iter} maximum iterations).')
     betac = torch.tensor(betac_init, dtype=torch.float32, device=device)
     gammac = torch.tensor(gammac_init, dtype=torch.float32, device=device)
-    residuals = torch.zeros(len(matches_file), dtype=torch.float32, device=device)
-    jacobian = torch.zeros(len(matches_file), 2, dtype=torch.float32, device=device)
+    residuals = torch.zeros(len(data), dtype=torch.float32, device=device)
+    jacobian = torch.zeros(len(data), 2, dtype=torch.float32, device=device)
 
     damping = 0.1
     eye = torch.eye(2, dtype=torch.float32, device=device)
@@ -128,7 +120,7 @@ def levenberg_marquardt(
         Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
 
         cursor = 0
-        for ui, vi, zi, Iic in iter_data(data, device=device):
+        for ui, vi, Iic, zi in data.iter(device=device):
             length = zi.shape[0]
             residuals[cursor: cursor + length] = (
                     Iic - Jc[vi, ui] * torch.exp(-betac * zi) - Bc * (1 - torch.exp(-gammac * zi))
@@ -160,7 +152,7 @@ def levenberg_marquardt(
 
 def simplex(
         image: sfm.Image,
-        data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
+        data: loader.Data,
         betac_init: float,
         gammac_init: float,
         max_iter: int = 200,
@@ -172,7 +164,7 @@ def simplex(
         betac_hat, gammac_hat = x.tolist()
         Bc_hat, Jc_hat = compute_Bc_Jc(image=image, data=data, betac=betac_hat, gammac=gammac_hat, device=device)
         cost = torch.zeros(1, dtype=torch.float32, device=device)
-        for ui, vi, zi, Iic in iter_data(data, device=device):
+        for ui, vi, Iic, zi in data.iter(device=device):
             cost += torch.square(
                 Iic - Jc_hat[vi, ui] * torch.exp(-betac_hat * zi) - Bc_hat * (1 - torch.exp(-gammac_hat * zi))
             ).sum()
@@ -191,8 +183,7 @@ def simplex(
 
 
 def adam(
-        data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
-        matches_file: loader.MatchesFile,
+        data: loader.Data,
         Jc_init: Tensor,
         Bc_init: float,
         betac_init: float,
@@ -208,7 +199,7 @@ def adam(
 
     optimizer = torch.optim.Adam([Jc, Bc, betac, gammac], lr=0.01)
 
-    size = len(matches_file)
+    size = len(data)
     previous_cost = np.inf
 
     for iteration in range(num_iter):
@@ -216,7 +207,7 @@ def adam(
         cost = 0
         optimizer.zero_grad()
 
-        for ui, vi, zi, Iic in iter_data(data, device=device):
+        for ui, vi, Iic, zi in data.iter(device=device):
             loss = torch.square(
                 Iic - Jc[vi, ui] * torch.exp(-betac * zi) - Bc * (1 - torch.exp(-gammac * zi))
             ).sum()
@@ -243,16 +234,15 @@ def solve_sucre(
         function_tolerance: float = 1e-5,
         device: str = 'cpu'
 ) -> tuple[Tensor, float, float, float]:
-    data = matches_file.load_channel(channel, pin_memory=device.lower() != 'cpu')
+    data = matches_file.load_channel(channel)
     Jc_init, Bc_init, betac_init, gammac_init = initialize_sucre_parameters(
-        image=image, data=data, matches_file=matches_file, channel=channel, mode=init, device=device
+        image=image, data=data, channel=channel, mode=init, device=device
     )
     print(f'Bc: {Bc_init}, betac: {betac_init}, gammac: {gammac_init}')
 
     diverged = False
 
     # TODO: filter matches by distance
-    # TODO: harmonize cost across all solvers
 
     if max_iter > 0:
         match solver:
@@ -260,7 +250,6 @@ def solve_sucre(
                 Jc, Bc, betac, gammac = levenberg_marquardt(
                     image=image,
                     data=data,
-                    matches_file=matches_file,
                     betac_init=betac_init,
                     gammac_init=gammac_init,
                     max_iter=max_iter,
@@ -279,7 +268,6 @@ def solve_sucre(
             case 'adam':
                 Jc, Bc, betac, gammac = adam(
                     data=data,
-                    matches_file=matches_file,
                     Jc_init=Jc_init,
                     Bc_init=Bc_init,
                     betac_init=betac_init,
