@@ -233,7 +233,7 @@ def solve_sucre(
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
         device: str = 'cpu'
-) -> tuple[Tensor, float, float, float]:
+) -> tuple[Tensor, float, float, float]:  # TODO: add outliers bounds options, multi-view or single-image
     data = matches_file.load_channel(channel)
     Jc_init, Bc_init, betac_init, gammac_init = initialize_sucre_parameters(
         image=image, data=data, channel=channel, mode=init, device=device
@@ -241,8 +241,6 @@ def solve_sucre(
     print(f'Bc: {Bc_init}, betac: {betac_init}, gammac: {gammac_init}')
 
     diverged = False
-
-    # TODO: filter matches by distance
 
     if max_iter > 0:
         match solver:
@@ -291,7 +289,10 @@ def solve_sucre(
         Jc = Jc.cpu()
 
     print(f'Bc: {Bc}, betac: {betac}, gammac: {gammac}')
-    return Jc, Bc, betac, gammac
+
+    # TODO: estimate J bounds (low and top 1/256 z-dependent percentiles)
+
+    return Jc, Bc, betac, gammac  # TODO: return diverged and J bounds
 
 
 def sucre(
@@ -321,6 +322,7 @@ def sucre(
 
     if force_compute_matches or not matches_path.exists():
         print(f'Compute {image_name} matches.')
+        # TODO: filter matches by distance
         image.match_images(
             image_list=image_list,
             matches_file=matches_file,
@@ -353,12 +355,12 @@ def sucre(
         )
 
     print('Save restored image.')
-    Image.fromarray(
-        np.uint8(normalization.histogram_stretching(J) * 255)
-    ).save((output_dir / image_name).with_suffix('.png'))
     torch.save(J, (output_dir / image_name).with_suffix('.pt'))
-    with open((output_dir / image_name).with_suffix('.yml'), 'w') as yaml_file:
+    with open((output_dir / image_name).with_suffix('.yml'), 'w') as yaml_file:  # TODO: log diverged and J bounds
         yaml.dump({'B': B.tolist(), 'beta': beta.tolist(), 'gamma': gamma.tolist()}, yaml_file)
+    Image.fromarray(
+        np.uint8(normalization.histogram_stretching(J) * 255)  # TODO: filter outliers
+    ).save((output_dir / image_name).with_suffix('.png'))
 
     if not keep_matches:
         print(f'Erase {matches_path}.')

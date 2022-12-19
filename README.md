@@ -3,11 +3,8 @@
 This code implements both Gaussian *Sea-thru* and SUCRe methods.
 
 ## Disclaimer
-- The script [read_write_model.py](src/thirdparty/read_write_model.py) is an external dependency available in
-[COLMAP repository](https://github.com/colmap/colmap/blob/dev/scripts/python/read_write_model.py),
-we simply copied it to provide a working version of SUCRe.
-- As of today, SUCRe requires a lot of RAM (at least 32GB for 5k images datasets). A low memory version is currently
-in development.
+**This README is not up-to-date**, however the `main` branch always contains the latest unstable release.
+Run scripts with `-h` command to see available options.
 
 ## Requirements
 SUCRe requires Python >=3.10 with modules specified in [environment.yml](environment.yml).
