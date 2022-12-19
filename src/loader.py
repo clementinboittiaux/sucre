@@ -36,12 +36,7 @@ class Data:
         self.data: list[dict[str, Tensor]] = []
 
     def append(self, u: Tensor, v: Tensor, Ic: Tensor, z: Tensor):
-        self.data.append({
-            'u': u,
-            'v': v,
-            'Ic': Ic,
-            'z': z
-        })
+        self.data.append({'u': u, 'v': v, 'Ic': Ic, 'z': z})
 
     def to_Ic_z(self, device: str = 'cpu') -> tuple[Tensor, Tensor]:
         Ic = torch.full((len(self),), torch.nan, dtype=torch.float32, device=device)
