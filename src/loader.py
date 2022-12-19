@@ -35,17 +35,17 @@ class Data:
     def __init__(self):
         self.data: list[dict[str, Tensor]] = []
 
-    def append(self, u: Tensor, v: Tensor, Ic: Tensor, z: Tensor):
-        self.data.append({'u': u, 'v': v, 'Ic': Ic, 'z': z})
+    def append(self, u: Tensor, v: Tensor, z: Tensor, Ic: Tensor):
+        self.data.append({'u': u, 'v': v, 'z': z, 'Ic': Ic})
 
     def to_Ic_z(self, device: str = 'cpu') -> tuple[Tensor, Tensor]:
-        Ic = torch.full((len(self),), torch.nan, dtype=torch.float32, device=device)
         z = torch.full((len(self),), torch.nan, dtype=torch.float32, device=device)
+        Ic = torch.full((len(self),), torch.nan, dtype=torch.float32, device=device)
         cursor = 0
         for sample in self.data:
-            length = sample['Ic'].shape[0]
-            Ic[cursor: cursor + length] = sample['Ic'].to(device)
+            length = sample['z'].shape[0]
             z[cursor: cursor + length] = sample['z'].to(device)
+            Ic[cursor: cursor + length] = sample['Ic'].to(device)
             cursor += length
         return Ic, z
 
@@ -54,8 +54,8 @@ class Data:
             yield (
                 sample['u'].to(device).long(),
                 sample['v'].to(device).long(),
-                sample['Ic'].to(device),
-                sample['z'].to(device)
+                sample['z'].to(device),
+                sample['Ic'].to(device)
             )
 
     def __len__(self):
@@ -98,8 +98,8 @@ class MatchesFile:
                 data.append(
                     u=torch.tensor(group['u1'][()]),
                     v=torch.tensor(group['v1'][()]),
-                    Ic=torch.tensor(group['I'][channel]),
-                    z=torch.tensor(group['z'][()])
+                    z=torch.tensor(group['z'][()]),
+                    Ic=torch.tensor(group['I'][channel])
                 )
         return data
 

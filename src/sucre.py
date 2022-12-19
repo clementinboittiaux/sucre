@@ -73,7 +73,7 @@ def compute_Bc_Jc(
     Bc_numerator = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
     Bc_denominator = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
 
-    for ui, vi, Iic, zi in data.iter(device=device):
+    for ui, vi, zi, Iic in data.iter(device=device):
         aic = torch.exp(-betac * zi)
         bic = 1 - torch.exp(-gammac * zi)
         Xc_numerator[vi, ui] += Iic * aic
@@ -83,7 +83,7 @@ def compute_Bc_Jc(
     Xc = Xc_numerator / XYc_denominator
     Yc = Yc_numerator / XYc_denominator
 
-    for ui, vi, Iic, zi in data.iter(device=device):
+    for ui, vi, zi, Iic in data.iter(device=device):
         aic = torch.exp(-betac * zi)
         bic = 1 - torch.exp(-gammac * zi)
         Mic = Iic - Xc[vi, ui] * aic
@@ -120,7 +120,7 @@ def levenberg_marquardt(
         Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
 
         cursor = 0
-        for ui, vi, Iic, zi in data.iter(device=device):
+        for ui, vi, zi, Iic in data.iter(device=device):
             length = zi.shape[0]
             residuals[cursor: cursor + length] = (
                     Iic - Jc[vi, ui] * torch.exp(-betac * zi) - Bc * (1 - torch.exp(-gammac * zi))
@@ -164,7 +164,7 @@ def simplex(
         betac_hat, gammac_hat = x.tolist()
         Bc_hat, Jc_hat = compute_Bc_Jc(image=image, data=data, betac=betac_hat, gammac=gammac_hat, device=device)
         cost = torch.zeros(1, dtype=torch.float32, device=device)
-        for ui, vi, Iic, zi in data.iter(device=device):
+        for ui, vi, zi, Iic in data.iter(device=device):
             cost += torch.square(
                 Iic - Jc_hat[vi, ui] * torch.exp(-betac_hat * zi) - Bc_hat * (1 - torch.exp(-gammac_hat * zi))
             ).sum()
@@ -207,7 +207,7 @@ def adam(
         cost = 0
         optimizer.zero_grad()
 
-        for ui, vi, Iic, zi in data.iter(device=device):
+        for ui, vi, zi, Iic in data.iter(device=device):
             loss = torch.square(
                 Iic - Jc[vi, ui] * torch.exp(-betac * zi) - Bc * (1 - torch.exp(-gammac * zi))
             ).sum()
