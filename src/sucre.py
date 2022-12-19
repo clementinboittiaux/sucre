@@ -158,42 +158,30 @@ def levenberg_marquardt(
     return Jc.cpu(), Bc.item(), betac.item(), gammac.item()
 
 
-def scipy_minimize(
+def simplex(
         image: sfm.Image,
         data: list[tuple[Tensor, Tensor, Tensor, Tensor]],
-        matches_file: loader.MatchesFile,
         betac_init: float,
         gammac_init: float,
-        solver: str = 'l-bfgs-b',
         max_iter: int = 200,
         device: str = 'cpu'
 ) -> tuple[Tensor, float, float, float]:
-    if solver not in ['l-bfgs-b', 'simplex']:
-        raise ValueError("`solver` supports 'l-bfgs-b' or 'simplex'.")
-    print(f'Optimize Jc, Bc, betac and gammac with {solver} algorithm ({max_iter} maximum iterations).')
-
-    size = len(matches_file)
+    print(f'Optimize Jc, Bc, betac and gammac with Nelder-Mead simplex algorithm ({max_iter} maximum iterations).')
 
     def residuals(x):
         betac_hat, gammac_hat = x.tolist()
         Bc_hat, Jc_hat = compute_Bc_Jc(image=image, data=data, betac=betac_hat, gammac=gammac_hat, device=device)
         cost = torch.zeros(1, dtype=torch.float32, device=device)
-        jacobian = torch.zeros(2, dtype=torch.float32, device=device)
         for ui, vi, zi, Iic in iter_data(data, device=device):
-            r = Iic - Jc_hat[vi, ui] * torch.exp(-betac_hat * zi) - Bc_hat * (1 - torch.exp(-gammac_hat * zi))
-            cost += torch.square(r).sum()
-            if solver == 'l-bfgs-b':
-                jacobian[0] += torch.sum(2 * r * Jc_hat[vi, ui] * zi * torch.exp(-betac_hat * zi))
-                jacobian[1] -= torch.sum(2 * r * Bc_hat * zi * torch.exp(-gammac_hat * zi))
-        if solver == 'l-bfgs-b':
-            return cost.item() / size, (jacobian / size).tolist()
+            cost += torch.square(
+                Iic - Jc_hat[vi, ui] * torch.exp(-betac_hat * zi) - Bc_hat * (1 - torch.exp(-gammac_hat * zi))
+            ).sum()
         return cost.item()
 
     betac, gammac = minimize(
         residuals,
         np.array([betac_init, gammac_init]),
-        method='L-BFGS-B' if solver == 'l-bfgs-b' else 'Nelder-Mead',
-        jac=solver == 'l-bfgs-b',
+        method='Nelder-Mead',
         bounds=[(1e-8, 5), (1e-8, 5)],
         options={'maxiter': max_iter, 'disp': True}
     ).x.tolist()
@@ -279,14 +267,12 @@ def solve_sucre(
                     function_tolerance=function_tolerance,
                     device=device
                 )
-            case 'l-bfgs-b' | 'simplex':
-                Jc, Bc, betac, gammac = scipy_minimize(
+            case 'simplex':
+                Jc, Bc, betac, gammac = simplex(
                     image=image,
                     data=data,
-                    matches_file=matches_file,
                     betac_init=betac_init,
                     gammac_init=gammac_init,
-                    solver=solver,
                     max_iter=max_iter,
                     device=device
                 )
@@ -302,7 +288,7 @@ def solve_sucre(
                     device=device
                 )
             case _:
-                raise ValueError("`method` supports 'lm', 'l-bfgs-b', 'simplex' or 'adam'")
+                raise ValueError("`method` supports 'lm', 'simplex' or 'adam'")
 
         if any([np.isnan(Bc), np.isnan(betac), np.isnan(gammac)]):
             print('WARNING: optimization diverged, revert to initial parameters.')
@@ -445,7 +431,7 @@ if __name__ == '__main__':
                              'discard when computing matches, one name per line.')
     parser.add_argument('--initialization', type=str, choices=['fast', 'dense'], default='dense',
                         help='initialize parameters with Gaussian Sea-thru on one image (fast) or all matches (dense).')
-    parser.add_argument('--solver', type=str, choices=['lm', 'l-bfgs-b', 'simplex', 'adam'],
+    parser.add_argument('--solver', type=str, choices=['lm', 'simplex', 'adam'],
                         default='lm', help='method to solve SUCRe least squares.')
     parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
     parser.add_argument('--function-tolerance', type=float, default=1e-5,
