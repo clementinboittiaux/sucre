@@ -34,8 +34,8 @@ import sfm
 
 
 def initialize_sucre_parameters(
-        image: sfm.Image,
         data: loader.Data,
+        image: sfm.Image,
         channel: int,
         mode: str = 'fast',
         device: str = 'cpu'
@@ -232,11 +232,12 @@ def solve_sucre(
         solver: str = 'lm',
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
+        outliers: str = 'single-view',
         device: str = 'cpu'
-) -> tuple[Tensor, float, float, float]:  # TODO: add outliers bounds options, multi-view or single-image
+) -> tuple[Tensor, float, float, float, float]:
     data = matches_file.load_channel(channel)
     Jc_init, Bc_init, betac_init, gammac_init = initialize_sucre_parameters(
-        image=image, data=data, channel=channel, mode=init, device=device
+        data=data, image=image, channel=channel, mode=init, device=device
     )
     print(f'Bc: {Bc_init}, betac: {betac_init}, gammac: {gammac_init}')
 
@@ -290,9 +291,11 @@ def solve_sucre(
 
     print(f'Bc: {Bc}, betac: {betac}, gammac: {gammac}')
 
-    # TODO: estimate J bounds (low and top 1/256 z-dependent percentiles)
+    Jcmin = normalization.estimate_Jcmin_zdcp(
+        data=data, image=image, channel=channel, Bc=Bc, betac=betac, gammac=gammac, mode=outliers, device=device
+    )
 
-    return Jc, Bc, betac, gammac  # TODO: return diverged and J bounds
+    return Jc, Bc, betac, gammac, Jcmin
 
 
 def sucre(
@@ -305,11 +308,13 @@ def sucre(
         solver: str = 'lm',
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
+        outliers: str = 'single-view',
         force_compute_matches: bool = False,
         keep_matches: bool = False,
         num_workers: int = 0,
         device: str = 'cpu'
 ):
+    print(f'Restore {image_name}.')
     image = colmap_model[image_name]
     image_list = list(colmap_model.images.values())
 
@@ -339,11 +344,12 @@ def sucre(
     B = torch.full((3,), torch.nan, dtype=torch.float32)
     beta = torch.full((3,), torch.nan, dtype=torch.float32)
     gamma = torch.full((3,), torch.nan, dtype=torch.float32)
+    Jmin = torch.full((3,), torch.nan, dtype=torch.float32)
     for channel in range(3):
         print(f'----------------------{["---", "-----", "----"][channel]}---------')
         print(f'SUCRe optimization on {["red", "green", "blue"][channel]} channel.')
         print(f'----------------------{["---", "-----", "----"][channel]}---------')
-        J[:, :, channel], B[channel], beta[channel], gamma[channel] = solve_sucre(
+        J[:, :, channel], B[channel], beta[channel], gamma[channel], Jmin[channel] = solve_sucre(
             image=image,
             channel=channel,
             matches_file=matches_file,
@@ -351,15 +357,23 @@ def sucre(
             solver=solver,
             max_iter=max_iter,
             function_tolerance=function_tolerance,
+            outliers=outliers,
             device=device
         )
 
-    print('Save restored image.')
+    print('-' * len(f'Save restored image in {output_dir}.'))
+    print(f'Save restored image in {output_dir}.')
+    print('-' * len(f'Save restored image in {output_dir}.'))
     torch.save(J, (output_dir / image_name).with_suffix('.pt'))
-    with open((output_dir / image_name).with_suffix('.yml'), 'w') as yaml_file:  # TODO: log diverged and J bounds
-        yaml.dump({'B': B.tolist(), 'beta': beta.tolist(), 'gamma': gamma.tolist()}, yaml_file)
+    with open((output_dir / image_name).with_suffix('.yml'), 'w') as yaml_file:
+        yaml.dump(
+            {'B': B.tolist(), 'beta': beta.tolist(), 'gamma': gamma.tolist(), 'Jmin': Jmin.tolist()},
+            yaml_file
+        )
     Image.fromarray(
-        np.uint8(normalization.histogram_stretching(J) * 255)  # TODO: filter outliers
+        np.uint8(normalization.histogram_stretching(
+            normalization.filter_min_outliers(image=J, thresholds=Jmin)
+        ) * 255)
     ).save((output_dir / image_name).with_suffix('.png'))
 
     if not keep_matches:
@@ -394,6 +408,7 @@ def parse_args(args: argparse.Namespace):
             solver=args.solver,
             max_iter=args.max_iter,
             function_tolerance=args.function_tolerance,
+            outliers=args.outliers,
             force_compute_matches=args.force_compute_matches,
             keep_matches=args.keep_matches,
             num_workers=args.num_workers,
@@ -419,13 +434,15 @@ if __name__ == '__main__':
     parser.add_argument('--filter-images-path', type=Path,
                         help='path to a .txt file with names of images to '
                              'discard when computing matches, one name per line.')
-    parser.add_argument('--initialization', type=str, choices=['fast', 'dense'], default='dense',
+    parser.add_argument('--initialization', type=str, choices=['fast', 'dense'], default='fast',
                         help='initialize parameters with Gaussian Sea-thru on one image (fast) or all matches (dense).')
     parser.add_argument('--solver', type=str, choices=['lm', 'simplex', 'adam'],
                         default='lm', help='method to solve SUCRe least squares.')
     parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
     parser.add_argument('--function-tolerance', type=float, default=1e-5,
                         help='stops optimization if cost function change is below this threshold.')
+    parser.add_argument('--outliers', type=str, choices=['single-view', 'multi-view', 'none'], default='single-view',
+                        help='estimate expected minimum values of restored image to filter outliers.')
     parser.add_argument('--force-compute-matches', action='store_true',
                         help='if matches file already exist, erase it and recompute matches.')
     parser.add_argument('--keep-matches', action='store_true', help='keep matches file (can take a lot a space).')

@@ -1,8 +1,6 @@
 # SUCRe
 
-<p align="center">
-    <img src="https://user-images.githubusercontent.com/74063264/208756825-6c9ca9db-e75e-48ee-8ae3-6fb632ad3d02.gif" width="100%"/>
-</p>
+<img src="https://user-images.githubusercontent.com/74063264/208756825-6c9ca9db-e75e-48ee-8ae3-6fb632ad3d02.gif" width="100%"/>
 
 This code implements both Gaussian *Sea-thru* and SUCRe methods.
 
