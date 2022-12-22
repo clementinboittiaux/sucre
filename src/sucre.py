@@ -435,7 +435,7 @@ if __name__ == '__main__':
                         help='path to a .txt file with names of images to '
                              'discard when computing matches, one name per line.')
     parser.add_argument('--initialization', type=str, choices=['single-view', 'multi-view'], default='single-view',
-                        help='initialize parameters with Gaussian Sea-thru on a single images or all matches.')
+                        help='initialize parameters with Gaussian Sea-thru on a single image or all matches.')
     parser.add_argument('--solver', type=str, choices=['lm', 'simplex', 'adam'],
                         default='lm', help='method to solve SUCRe least squares.')
     parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
