@@ -37,26 +37,26 @@ def initialize_sucre_parameters(
         data: loader.Data,
         image: sfm.Image,
         channel: int,
-        mode: str = 'fast',
+        mode: str = 'single-view',
         device: str = 'cpu'
 ) -> tuple[Tensor, float, float, float]:
     print(f'Initialize parameters with Gaussian Sea-thru ({mode} mode).')
     match mode:
-        case 'fast':
+        case 'single-view':
             Ic = loader.load_image(image.image_path)[:, :, channel].to(device)
             z = image.distance_map(loader.load_depth(image.depth_path).to(device))
             args_valid = z > 0
             Bc, betac, gammac = gaussian_seathru.solve_gaussian_seathru(Ic[args_valid], z[args_valid], linear_beta=True)
             Jc = torch.full((image.camera.height, image.camera.width), torch.nan, dtype=torch.float32, device=device)
             Jc[args_valid] = gaussian_seathru.compute_J(Ic[args_valid], z[args_valid], Bc, betac, gammac)
-        case 'dense':
+        case 'multi-view':
             Bc, betac, gammac = gaussian_seathru.solve_gaussian_seathru(
                 *data.to_Ic_z(device=device), linear_beta=True
             )
             Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
             Bc = Bc.item()
         case _:
-            raise ValueError("only 'fast' and 'dense' are supported for `mode`.")
+            raise ValueError("`mode` only supports 'single-view' and 'multi-view'.")
     return Jc.cpu(), Bc, betac, gammac
 
 
@@ -228,7 +228,7 @@ def solve_sucre(
         image: sfm.Image,
         channel: int,
         matches_file: loader.MatchesFile,
-        init: str = 'fast',
+        init: str = 'single-view',
         solver: str = 'lm',
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
@@ -284,7 +284,7 @@ def solve_sucre(
     else:
         Jc, Bc, betac, gammac = Jc_init, Bc_init, betac_init, gammac_init
 
-    if init == 'fast' and (diverged or max_iter <= 0):
+    if init == 'single-view' and (diverged or max_iter <= 0):
         Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
         Bc = Bc.item()
         Jc = Jc.cpu()
@@ -304,7 +304,7 @@ def sucre(
         output_dir: Path,
         min_cover: float,
         filter_image_names: list[str] = None,
-        init: str = 'fast',
+        init: str = 'single-view',
         solver: str = 'lm',
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
@@ -434,8 +434,8 @@ if __name__ == '__main__':
     parser.add_argument('--filter-images-path', type=Path,
                         help='path to a .txt file with names of images to '
                              'discard when computing matches, one name per line.')
-    parser.add_argument('--initialization', type=str, choices=['fast', 'dense'], default='fast',
-                        help='initialize parameters with Gaussian Sea-thru on one image (fast) or all matches (dense).')
+    parser.add_argument('--initialization', type=str, choices=['single-view', 'multi-view'], default='single-view',
+                        help='initialize parameters with Gaussian Sea-thru on a single images or all matches.')
     parser.add_argument('--solver', type=str, choices=['lm', 'simplex', 'adam'],
                         default='lm', help='method to solve SUCRe least squares.')
     parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
