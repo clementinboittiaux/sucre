@@ -174,7 +174,7 @@ def simplex(
         residuals,
         np.array([betac_init, gammac_init]),
         method='Nelder-Mead',
-        bounds=[(1e-8, 5), (1e-8, 5)],
+        bounds=[(1e-6, 5), (1e-6, 5)],
         options={'maxiter': max_iter, 'disp': True}
     ).x.tolist()
     Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
