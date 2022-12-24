@@ -38,25 +38,20 @@ class Data:
     def append(self, u: Tensor, v: Tensor, z: Tensor, Ic: Tensor):
         self.data.append({'u': u, 'v': v, 'z': z, 'Ic': Ic})
 
-    def to_Ic_z(self, device: str = 'cpu') -> tuple[Tensor, Tensor]:
-        z = torch.full((len(self),), torch.nan, dtype=torch.float32, device=device)
-        Ic = torch.full((len(self),), torch.nan, dtype=torch.float32, device=device)
+    def to_Ic_z(self) -> tuple[Tensor, Tensor]:
+        z = torch.full((len(self),), torch.nan, dtype=torch.float32, device=self.data[0]['z'].device)
+        Ic = torch.full((len(self),), torch.nan, dtype=torch.float32, device=self.data[0]['Ic'].device)
         cursor = 0
         for sample in self.data:
             length = sample['z'].shape[0]
-            z[cursor: cursor + length] = sample['z'].to(device)
-            Ic[cursor: cursor + length] = sample['Ic'].to(device)
+            z[cursor: cursor + length] = sample['z']
+            Ic[cursor: cursor + length] = sample['Ic']
             cursor += length
         return Ic, z
 
-    def iter(self, device: str = 'cpu') -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    def iter(self) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         for sample in self.data:
-            yield (
-                sample['u'].to(device).long(),
-                sample['v'].to(device).long(),
-                sample['z'].to(device),
-                sample['Ic'].to(device)
-            )
+            yield sample['u'].long(), sample['v'].long(), sample['z'], sample['Ic']
 
     def __len__(self):
         return sum([sample['Ic'].shape[0] for sample in self.data])
@@ -91,15 +86,15 @@ class MatchesFile:
                 group['z'][()] = image_distance[v2, u2].cpu().numpy()
                 group['I'][()] = image_image[v2, u2].T.numpy()
 
-    def load_channel(self, channel: int) -> Data:
+    def load_channel(self, channel: int, device: str = 'cpu') -> Data:
         data = Data()
         with h5py.File(self.path, 'r', libver='latest') as f:
             for group in f.values():
                 data.append(
-                    u=torch.tensor(group['u1'][()]),
-                    v=torch.tensor(group['v1'][()]),
-                    z=torch.tensor(group['z'][()]),
-                    Ic=torch.tensor(group['I'][channel])
+                    u=torch.tensor(group['u1'][()], device=device),
+                    v=torch.tensor(group['v1'][()], device=device),
+                    z=torch.tensor(group['z'][()], device=device),
+                    Ic=torch.tensor(group['I'][channel], device=device)
                 )
         return data
 

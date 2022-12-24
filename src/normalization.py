@@ -42,7 +42,7 @@ def estimate_Jcmin_zdcp(
             Ic = Ic[args_valid]
             z = z[args_valid]
         case 'multi-view':
-            Ic, z = data.to_Ic_z(device=device)
+            Ic, z = data.to_Ic_z()
         case 'none':
             return -torch.inf
         case _:
