@@ -184,20 +184,21 @@ def simplex(
 
 def adam(
         data: loader.Data,
+        image: sfm.Image,
+        channel: int,
         Jc_init: Tensor,
-        Bc_init: float,
-        betac_init: float,
-        gammac_init: float,
         num_iter: int = 200,
         device: str = 'cpu'
 ) -> tuple[Tensor, float, float, float]:
     print(f'Optimize Jc, Bc, betac and gammac with Adam optimizer ({num_iter} iterations).')
-    Jc = torch.nn.Parameter(Jc_init.to(device))
-    Bc = torch.nn.Parameter(torch.tensor(Bc_init, dtype=torch.float32, device=device))
-    betac = torch.nn.Parameter(torch.tensor(betac_init, dtype=torch.float32, device=device))
-    gammac = torch.nn.Parameter(torch.tensor(gammac_init, dtype=torch.float32, device=device))
+    Jc = loader.load_image(image.image_path)[:, :, channel]
+    Jc[Jc_init.isnan()] = torch.nan
+    Jc = torch.nn.Parameter(Jc.to(device))
+    Bc = torch.nn.Parameter(torch.tensor(0.25, dtype=torch.float32, device=device))
+    betac = torch.nn.Parameter(torch.tensor(0.1, dtype=torch.float32, device=device))
+    gammac = torch.nn.Parameter(torch.tensor(0.1, dtype=torch.float32, device=device))
 
-    optimizer = torch.optim.Adam([Jc, Bc, betac, gammac], lr=0.01)
+    optimizer = torch.optim.Adam([Jc, Bc, betac, gammac], lr=0.05)
 
     size = len(data)
     previous_cost = np.inf
@@ -267,10 +268,9 @@ def solve_sucre(
             case 'adam':
                 Jc, Bc, betac, gammac = adam(
                     data=data,
+                    image=image,
+                    channel=channel,
                     Jc_init=Jc_init,
-                    Bc_init=Bc_init,
-                    betac_init=betac_init,
-                    gammac_init=gammac_init,
                     num_iter=max_iter,
                     device=device
                 )
