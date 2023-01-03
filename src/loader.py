@@ -53,6 +53,15 @@ class Data:
         for sample in self.data:
             yield sample['u'].long(), sample['v'].long(), sample['z'], sample['Ic']
 
+    def iterbatch(self, batch_size: int) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        for i in range(0, len(self.data), batch_size):
+            yield (
+                torch.hstack([sample['u'] for sample in self.data[i:i + batch_size]]).long(),
+                torch.hstack([sample['v'] for sample in self.data[i:i + batch_size]]).long(),
+                torch.hstack([sample['z'] for sample in self.data[i:i + batch_size]]),
+                torch.hstack([sample['Ic'] for sample in self.data[i:i + batch_size]])
+            )
+
     def __len__(self):
         return sum([sample['Ic'].shape[0] for sample in self.data])
 

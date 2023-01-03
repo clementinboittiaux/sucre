@@ -198,6 +198,7 @@ def adam(
         betac_init: float,
         gammac_init: float,
         num_iter: int = 200,
+        batch_size: int = 1,
         device: str = 'cpu'
 ) -> tuple[Tensor, float, float, float]:
     print(f'Optimize Jc, Bc, betac and gammac with Adam optimizer ({num_iter} iterations).')
@@ -216,7 +217,7 @@ def adam(
         cost = 0
         optimizer.zero_grad()
 
-        for ui, vi, zi, Iic in data.iter():
+        for ui, vi, zi, Iic in data.iterbatch(batch_size=batch_size):
             loss = torch.square(
                 Iic - Jc[vi, ui] * torch.exp(-betac * zi) - Bc * (1 - torch.exp(-gammac * zi))
             ).sum()
@@ -242,6 +243,7 @@ def solve_sucre(
         solver: str = 'lm',
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
+        batch_size: int = 1,
         outliers: str = 'single-view',
         device: str = 'cpu'
 ) -> tuple[Tensor, float, float, float, float, float]:
@@ -283,6 +285,7 @@ def solve_sucre(
                     betac_init=betac_init,
                     gammac_init=gammac_init,
                     num_iter=max_iter,
+                    batch_size=batch_size,
                     device=device
                 )
             case _:
@@ -317,6 +320,7 @@ def sucre(
         solver: str = 'lm',
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
+        batch_size: int = 1,
         outliers: str = 'single-view',
         force_compute_matches: bool = False,
         keep_matches: bool = False,
@@ -368,6 +372,7 @@ def sucre(
             solver=solver,
             max_iter=max_iter,
             function_tolerance=function_tolerance,
+            batch_size=batch_size,
             outliers=outliers,
             device=device
         )
@@ -428,6 +433,7 @@ def parse_args(args: argparse.Namespace):
             solver=args.solver,
             max_iter=args.max_iter,
             function_tolerance=args.function_tolerance,
+            batch_size=args.batch_size,
             outliers=args.outliers,
             force_compute_matches=args.force_compute_matches,
             keep_matches=args.keep_matches,
@@ -458,10 +464,12 @@ if __name__ == '__main__':
                         help='initialize parameters with bright and dark channel prior on all images (global) or'
                              ' Gaussian Sea-thru on a single image (single-view) or all matches (multi-view).')
     parser.add_argument('--solver', type=str, choices=['lm', 'simplex', 'adam'],
-                        default='lm', help='method to solve SUCRe least squares.')
+                        default='adam', help='method to solve SUCRe least squares.')
     parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
     parser.add_argument('--function-tolerance', type=float, default=1e-5,
                         help='stops optimization if cost function change is below this threshold.')
+    parser.add_argument('--batch-size', type=int, default=1,
+                        help='batch size for adam optimization, higher is faster but requires more RAM.')
     parser.add_argument('--outliers', type=str,
                         choices=['global', 'single-view', 'multi-view', 'none'], default='single-view',
                         help='estimate expected minimum and maximum values of restored image to filter outliers.')

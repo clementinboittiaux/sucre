@@ -15,10 +15,11 @@
 #
 # Author: Clementin Boittiaux <boittiauxclementin at gmail dot com>
 
+from pathlib import Path
+
 import numpy as np
 import torch
 from torch import Tensor
-from pathlib import Path
 
 import loader
 import sfm
