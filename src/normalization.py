@@ -18,12 +18,14 @@
 import numpy as np
 import torch
 from torch import Tensor
+from pathlib import Path
 
 import loader
 import sfm
+import utils
 
 
-def estimate_Jcmin_zdcp(
+def estimate_Jc_bounds(
         data: loader.Data,
         image: sfm.Image,
         channel: int,
@@ -31,10 +33,14 @@ def estimate_Jcmin_zdcp(
         betac: float,
         gammac: float,
         mode: str = 'single-view',
+        params_path: Path = None,
         device: str = 'cpu'
-) -> float:
-    print(f'Estimate expected minimum value of Jc with distance-dependant DCP ({mode} mode).')
+) -> tuple[float, float]:
+    print(f'Estimate expected minimum and maximum value of Jc with distance-dependant DCP ({mode} mode).')
     match mode:
+        case 'global':
+            params = utils.read_params_path(params_path)
+            return params['Jmin'][channel], params['Jmax'][channel]
         case 'single-view':
             Ic = loader.load_image(image.image_path)[:, :, channel].to(device)
             z = image.distance_map(loader.load_depth(image.depth_path).to(device))
@@ -42,11 +48,11 @@ def estimate_Jcmin_zdcp(
             Ic = Ic[args_valid]
             z = z[args_valid]
         case 'multi-view':
-            Ic, z = data.to_Ic_z()
+            Ic, z = data.to_Ic_z(device=device)
         case 'none':
-            return -torch.inf
+            return -torch.inf, torch.inf
         case _:
-            raise ValueError("`mode` only supports 'single-view', 'multi-view' and 'none'.")
+            raise ValueError("`mode` only supports 'global', 'single-view', 'multi-view' and 'none'.")
     z_bounds = np.linspace(z.min().item(), z.max().item(), 11)
     Ic_low, z_low = [], []
     for z_min, z_max in zip(z_bounds[:-1], z_bounds[1:]):
@@ -59,13 +65,14 @@ def estimate_Jcmin_zdcp(
             z_low.append(z_range[args_low])
     Ic_low, z_low = torch.hstack(Ic_low), torch.hstack(z_low)
     Jcmin = torch.median((Ic_low - Bc * (1 - torch.exp(-gammac * z_low))) * torch.exp(betac * z_low))
-    return Jcmin.item()
+    return Jcmin.item(), torch.inf
 
 
-def filter_min_outliers(image: Tensor, thresholds: Tensor):
-    image = image.clone()
-    image[image < thresholds] = torch.nan
-    return image
+def filter_outliers(J: Tensor, Jmin: Tensor, Jmax: Tensor):
+    J = J.clone()
+    J[J < Jmin] = torch.nan
+    J = J.clip(max=Jmax)
+    return J
 
 
 def histogram_stretching(image: Tensor):

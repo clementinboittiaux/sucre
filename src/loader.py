@@ -38,14 +38,14 @@ class Data:
     def append(self, u: Tensor, v: Tensor, z: Tensor, Ic: Tensor):
         self.data.append({'u': u, 'v': v, 'z': z, 'Ic': Ic})
 
-    def to_Ic_z(self) -> tuple[Tensor, Tensor]:
-        z = torch.full((len(self),), torch.nan, dtype=torch.float32, device=self.data[0]['z'].device)
-        Ic = torch.full((len(self),), torch.nan, dtype=torch.float32, device=self.data[0]['Ic'].device)
+    def to_Ic_z(self, device: str = 'cpu') -> tuple[Tensor, Tensor]:
+        z = torch.full((len(self),), torch.nan, dtype=torch.float32, device=device)
+        Ic = torch.full((len(self),), torch.nan, dtype=torch.float32, device=device)
         cursor = 0
         for sample in self.data:
             length = sample['z'].shape[0]
-            z[cursor: cursor + length] = sample['z']
-            Ic[cursor: cursor + length] = sample['Ic']
+            z[cursor: cursor + length] = sample['z'].to(device)
+            Ic[cursor: cursor + length] = sample['Ic'].to(device)
             cursor += length
         return Ic, z
 

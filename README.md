@@ -92,7 +92,3 @@ someimage.png
 anotherimage.png
 ...
 ```
-
-## Future features
-- Sample random pairs to estimate fixed image formation model and normalization parameters for a given scene.
-- Use aforementioned parameters to correct images in a multi-view settings.

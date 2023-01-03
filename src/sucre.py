@@ -31,6 +31,7 @@ import gaussian_seathru
 import loader
 import normalization
 import sfm
+import utils
 
 
 def initialize_sucre_parameters(
@@ -38,10 +39,15 @@ def initialize_sucre_parameters(
         image: sfm.Image,
         channel: int,
         mode: str = 'single-view',
+        params_path: Path = None,
         device: str = 'cpu'
 ) -> tuple[Tensor, float, float, float]:
     print(f'Initialize parameters with Gaussian Sea-thru ({mode} mode).')
     match mode:
+        case 'global':
+            params = utils.read_params_path(params_path)
+            Bc, betac, gammac = params['B'][channel], params['beta'][channel], params['gamma'][channel]
+            _, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, Bc=Bc, device=device)
         case 'single-view':
             Ic = loader.load_image(image.image_path)[:, :, channel].to(device)
             z = image.distance_map(loader.load_depth(image.depth_path).to(device))
@@ -51,12 +57,11 @@ def initialize_sucre_parameters(
             Jc[args_valid] = gaussian_seathru.compute_J(Ic[args_valid], z[args_valid], Bc, betac, gammac)
         case 'multi-view':
             Bc, betac, gammac = gaussian_seathru.solve_gaussian_seathru(
-                *data.to_Ic_z(), linear_beta=True
+                *data.to_Ic_z(device=device), linear_beta=True
             )
-            Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
-            Bc = Bc.item()
+            _, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, Bc=Bc, device=device)
         case _:
-            raise ValueError("`mode` only supports 'single-view' and 'multi-view'.")
+            raise ValueError("`mode` only supports 'global', 'single-view' and 'multi-view'.")
     return Jc.cpu(), Bc, betac, gammac
 
 
@@ -65,13 +70,12 @@ def compute_Bc_Jc(
         data: loader.Data,
         betac: Tensor | float,
         gammac: Tensor | float,
+        Bc: Tensor | float = None,
         device: str = 'cpu'
-) -> tuple[Tensor, Tensor]:
+) -> tuple[Tensor | float, Tensor]:
     Xc_numerator = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
     Yc_numerator = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
     XYc_denominator = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
-    Bc_numerator = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
-    Bc_denominator = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
 
     for ui, vi, zi, Iic in data.iter():
         aic = torch.exp(-betac * zi)
@@ -83,15 +87,20 @@ def compute_Bc_Jc(
     Xc = Xc_numerator / XYc_denominator
     Yc = Yc_numerator / XYc_denominator
 
-    for ui, vi, zi, Iic in data.iter():
-        aic = torch.exp(-betac * zi)
-        bic = 1 - torch.exp(-gammac * zi)
-        Mic = Iic - Xc[vi, ui] * aic
-        Nic = bic - Yc[vi, ui] * aic
-        Bc_numerator[vi, ui] += Mic * Nic
-        Bc_denominator[vi, ui] += torch.square(Nic)
+    if Bc is None:
+        Bc_numerator = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
+        Bc_denominator = torch.zeros(image.camera.height, image.camera.width, dtype=torch.float32, device=device)
 
-    Bc = Bc_numerator.sum() / Bc_denominator.sum()
+        for ui, vi, zi, Iic in data.iter():
+            aic = torch.exp(-betac * zi)
+            bic = 1 - torch.exp(-gammac * zi)
+            Mic = Iic - Xc[vi, ui] * aic
+            Nic = bic - Yc[vi, ui] * aic
+            Bc_numerator[vi, ui] += Mic * Nic
+            Bc_denominator[vi, ui] += torch.square(Nic)
+
+        Bc = Bc_numerator.sum() / Bc_denominator.sum()
+
     Jc = Xc - Bc * Yc
     return Bc, Jc
 
@@ -184,19 +193,18 @@ def simplex(
 
 def adam(
         data: loader.Data,
-        image: sfm.Image,
-        channel: int,
         Jc_init: Tensor,
+        Bc_init: float,
+        betac_init: float,
+        gammac_init: float,
         num_iter: int = 200,
         device: str = 'cpu'
 ) -> tuple[Tensor, float, float, float]:
     print(f'Optimize Jc, Bc, betac and gammac with Adam optimizer ({num_iter} iterations).')
-    Jc = loader.load_image(image.image_path)[:, :, channel]
-    Jc[Jc_init.isnan()] = torch.nan
-    Jc = torch.nn.Parameter(Jc.to(device))
-    Bc = torch.nn.Parameter(torch.tensor(0.25, dtype=torch.float32, device=device))
-    betac = torch.nn.Parameter(torch.tensor(0.1, dtype=torch.float32, device=device))
-    gammac = torch.nn.Parameter(torch.tensor(0.1, dtype=torch.float32, device=device))
+    Jc = torch.nn.Parameter(Jc_init.to(device))
+    Bc = torch.nn.Parameter(torch.tensor(Bc_init, dtype=torch.float32, device=device))
+    betac = torch.nn.Parameter(torch.tensor(betac_init, dtype=torch.float32, device=device))
+    gammac = torch.nn.Parameter(torch.tensor(gammac_init, dtype=torch.float32, device=device))
 
     optimizer = torch.optim.Adam([Jc, Bc, betac, gammac], lr=0.05)
 
@@ -230,19 +238,21 @@ def solve_sucre(
         channel: int,
         matches_file: loader.MatchesFile,
         init: str = 'single-view',
+        params_path: Path = None,
         solver: str = 'lm',
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
         outliers: str = 'single-view',
         device: str = 'cpu'
-) -> tuple[Tensor, float, float, float, float]:
+) -> tuple[Tensor, float, float, float, float, float]:
     data = matches_file.load_channel(channel, device=device)
     Jc_init, Bc_init, betac_init, gammac_init = initialize_sucre_parameters(
-        data=data, image=image, channel=channel, mode=init, device=device
+        data=data, image=image, channel=channel, params_path=params_path, mode=init, device=device
     )
     print(f'Bc: {Bc_init}, betac: {betac_init}, gammac: {gammac_init}')
 
     diverged = False
+    Jc, Bc, betac, gammac = None, None, None, None
 
     if max_iter > 0:
         match solver:
@@ -268,9 +278,10 @@ def solve_sucre(
             case 'adam':
                 Jc, Bc, betac, gammac = adam(
                     data=data,
-                    image=image,
-                    channel=channel,
                     Jc_init=Jc_init,
+                    Bc_init=Bc_init,
+                    betac_init=betac_init,
+                    gammac_init=gammac_init,
                     num_iter=max_iter,
                     device=device
                 )
@@ -279,23 +290,21 @@ def solve_sucre(
 
         if any([np.isnan(Bc), np.isnan(betac), np.isnan(gammac)]):
             print('WARNING: optimization diverged, revert to initial parameters.')
-            Jc, Bc, betac, gammac = Jc_init, Bc_init, betac_init, gammac_init
             diverged = True
-    else:
-        Jc, Bc, betac, gammac = Jc_init, Bc_init, betac_init, gammac_init
 
-    if init == 'single-view' and (diverged or max_iter <= 0):
-        Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
-        Bc = Bc.item()
+    if diverged or max_iter <= 0:
+        Bc, betac, gammac = Bc_init, betac_init, gammac_init
+        _, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, Bc=Bc, device=device)
         Jc = Jc.cpu()
 
     print(f'Bc: {Bc}, betac: {betac}, gammac: {gammac}')
 
-    Jcmin = normalization.estimate_Jcmin_zdcp(
-        data=data, image=image, channel=channel, Bc=Bc, betac=betac, gammac=gammac, mode=outliers, device=device
+    Jcmin, Jcmax = normalization.estimate_Jc_bounds(
+        data=data, image=image, channel=channel, Bc=Bc, betac=betac, gammac=gammac,
+        mode=outliers, params_path=params_path, device=device
     )
 
-    return Jc, Bc, betac, gammac, Jcmin
+    return Jc, Bc, betac, gammac, Jcmin, Jcmax
 
 
 def sucre(
@@ -345,15 +354,17 @@ def sucre(
     beta = torch.full((3,), torch.nan, dtype=torch.float32)
     gamma = torch.full((3,), torch.nan, dtype=torch.float32)
     Jmin = torch.full((3,), torch.nan, dtype=torch.float32)
+    Jmax = torch.full((3,), torch.nan, dtype=torch.float32)
     for channel in range(3):
         print(f'----------------------{["---", "-----", "----"][channel]}---------')
         print(f'SUCRe optimization on {["red", "green", "blue"][channel]} channel.')
         print(f'----------------------{["---", "-----", "----"][channel]}---------')
-        J[:, :, channel], B[channel], beta[channel], gamma[channel], Jmin[channel] = solve_sucre(
+        J[:, :, channel], B[channel], beta[channel], gamma[channel], Jmin[channel], Jmax[channel] = solve_sucre(
             image=image,
             channel=channel,
             matches_file=matches_file,
             init=init,
+            params_path=output_dir / 'global.yml',
             solver=solver,
             max_iter=max_iter,
             function_tolerance=function_tolerance,
@@ -367,12 +378,18 @@ def sucre(
     torch.save(J, (output_dir / image_name).with_suffix('.pt'))
     with open((output_dir / image_name).with_suffix('.yml'), 'w') as yaml_file:
         yaml.dump(
-            {'B': B.tolist(), 'beta': beta.tolist(), 'gamma': gamma.tolist(), 'Jmin': Jmin.tolist()},
+            {
+                'B': B.tolist(),
+                'beta': beta.tolist(),
+                'gamma': gamma.tolist(),
+                'Jmin': Jmin.tolist(),
+                'Jmax': Jmax.tolist()
+            },
             yaml_file
         )
     Image.fromarray(
         np.uint8(normalization.histogram_stretching(
-            normalization.filter_min_outliers(image=J, thresholds=Jmin)
+            normalization.filter_outliers(J=J, Jmin=Jmin, Jmax=Jmax)
         ) * 255)
     ).save((output_dir / image_name).with_suffix('.png'))
 
@@ -396,6 +413,9 @@ def parse_args(args: argparse.Namespace):
         for image_id in range(args.image_ids[0], args.image_ids[1] + 1):
             if image_id in colmap_model.images:
                 image_names.append(colmap_model.images[image_id].name)
+
+    if args.initialization == 'global':
+        utils.estimate_global_parameters(image_list=list(colmap_model.images.values()), output_dir=args.output_dir)
 
     for image_name in image_names:
         sucre(
@@ -434,15 +454,17 @@ if __name__ == '__main__':
     parser.add_argument('--filter-images-path', type=Path,
                         help='path to a .txt file with names of images to '
                              'discard when computing matches, one name per line.')
-    parser.add_argument('--initialization', type=str, choices=['single-view', 'multi-view'], default='single-view',
-                        help='initialize parameters with Gaussian Sea-thru on a single image or all matches.')
+    parser.add_argument('--initialization', type=str, choices=['single-view', 'multi-view', 'global'], default='global',
+                        help='initialize parameters with bright and dark channel prior on all images (global) or'
+                             ' Gaussian Sea-thru on a single image (single-view) or all matches (multi-view).')
     parser.add_argument('--solver', type=str, choices=['lm', 'simplex', 'adam'],
                         default='lm', help='method to solve SUCRe least squares.')
     parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
     parser.add_argument('--function-tolerance', type=float, default=1e-5,
                         help='stops optimization if cost function change is below this threshold.')
-    parser.add_argument('--outliers', type=str, choices=['single-view', 'multi-view', 'none'], default='single-view',
-                        help='estimate expected minimum values of restored image to filter outliers.')
+    parser.add_argument('--outliers', type=str,
+                        choices=['global', 'single-view', 'multi-view', 'none'], default='single-view',
+                        help='estimate expected minimum and maximum values of restored image to filter outliers.')
     parser.add_argument('--force-compute-matches', action='store_true',
                         help='if matches file already exist, erase it and recompute matches.')
     parser.add_argument('--keep-matches', action='store_true', help='keep matches file (can take a lot a space).')
