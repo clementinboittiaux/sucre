@@ -18,30 +18,21 @@ def read_params_path(params_path: Path):
     return params
 
 
-def estimate_global_parameters(image_list: list[sfm.Image], output_dir: Path):
+def estimate_global_parameters(image_list: list[sfm.Image], output_dir: Path, device: str = 'cpu'):
     output_path = output_dir / 'global.yml'
     if output_path.exists():
         print(f'{output_path} already exists. Using it as initial parameters.')
         return
 
     print('Estimate veiling light and select pixels for dark/bright channel priors.')
-    dcp = [
-        {'Ic': [], 'z': []},
-        {'Ic': [], 'z': []},
-        {'Ic': [], 'z': []}
-    ]
-    bcp = [
-        {'Ic': [], 'z': []},
-        {'Ic': [], 'z': []},
-        {'Ic': [], 'z': []}
-    ]
+    dcp = [{'Ic': [], 'z': []}, {'Ic': [], 'z': []}, {'Ic': [], 'z': []}]
+    bcp = [{'Ic': [], 'z': []}, {'Ic': [], 'z': []}, {'Ic': [], 'z': []}]
     n_obs = 0
-    B = torch.zeros(3, dtype=torch.float32, device='cuda')
-    for image_idx, image_image, image_depth in tqdm.tqdm(
-            loader.load_images(image_list, num_workers=10)):
+    B = torch.zeros(3, dtype=torch.float32, device=device)
+    for image_idx, image_image, image_depth in tqdm.tqdm(loader.load_images(image_list, num_workers=10)):
         image = image_list[image_idx]
-        I = image_image.to('cuda')
-        z = image.distance_map(image_depth.to('cuda'))
+        I = image_image.to(device)
+        z = image.distance_map(image_depth.to(device))
         args_valid = z > 0
         n_obs += torch.sum(~args_valid)
         B += I[~args_valid].sum(dim=0)
@@ -63,11 +54,11 @@ def estimate_global_parameters(image_list: list[sfm.Image], output_dir: Path):
     print(f'B: {B.tolist()}')
 
     print('Estimate gamma width dark channel prior.')
-    gamma = torch.zeros(3, dtype=torch.float32, device='cuda')
+    gamma = torch.zeros(3, dtype=torch.float32, device=device)
     for channel in range(3):
         Bc = B[channel]
-        Ic = torch.hstack(dcp[channel]['Ic']).to('cuda')
-        z = torch.hstack(dcp[channel]['z']).to('cuda')
+        Ic = torch.hstack(dcp[channel]['Ic']).to(device)
+        z = torch.hstack(dcp[channel]['z']).to(device)
         args_valid = Ic < Bc
         Ic_valid, z_valid = Ic[args_valid], z[args_valid]
         gammac_init = (torch.log(Bc / (Bc - Ic_valid)) * z_valid).sum() / z_valid.square().sum()
@@ -75,20 +66,15 @@ def estimate_global_parameters(image_list: list[sfm.Image], output_dir: Path):
         def residuals(x):
             return torch.square(Ic - Bc * (1 - torch.exp(-x[0] * z))).sum().item()
 
-        gamma[channel] = minimize(
-            residuals,
-            gammac_init.item(),
-            method='Nelder-Mead',
-            options={'disp': True}
-        ).x[0]
+        gamma[channel] = minimize(residuals, gammac_init.item(), method='Nelder-Mead', options={'disp': True}).x[0]
     print(f'gamma: {gamma.tolist()}')
 
     print('Estimate beta and Jmax with bright channel prior.')
-    beta = torch.zeros(3, dtype=torch.float32, device='cuda')
-    Jmax = torch.zeros(3, dtype=torch.float32, device='cuda')
+    beta = torch.zeros(3, dtype=torch.float32, device=device)
+    Jmax = torch.zeros(3, dtype=torch.float32, device=device)
     for channel in range(3):
-        Ic = torch.hstack(bcp[channel]['Ic']).to('cuda')
-        z = torch.hstack(bcp[channel]['z']).to('cuda')
+        Ic = torch.hstack(bcp[channel]['Ic']).to(device)
+        z = torch.hstack(bcp[channel]['z']).to(device)
         Dc = Ic - B[channel] * (1 - torch.exp(-gamma[channel] * z))
         args_valid = Dc > 0
         Dc_valid, z_valid = Dc[args_valid], z[args_valid]
@@ -113,23 +99,20 @@ def estimate_global_parameters(image_list: list[sfm.Image], output_dir: Path):
     print(f'beta: {beta.tolist()}\nJmax: {Jmax.tolist()}')
 
     print('Find Jmin with dark channel prior using all parameters.')
-    Jmin = torch.zeros(3, dtype=torch.float32, device='cuda')
+    Jmin = torch.zeros(3, dtype=torch.float32, device=device)
     for channel in range(3):
-        Ic = torch.hstack(dcp[channel]['Ic']).to('cuda')
-        z = torch.hstack(dcp[channel]['z']).to('cuda')
+        Ic = torch.hstack(dcp[channel]['Ic']).to(device)
+        z = torch.hstack(dcp[channel]['z']).to(device)
         Jmin[channel] = torch.median(
             (Ic - B[channel] * (1 - torch.exp(-gamma[channel] * z))) * torch.exp(beta[channel] * z)
         )
     print(f'Jmin: {Jmin.tolist()}')
-    
+
     with open(output_path, 'w') as yaml_file:
-        yaml.dump(
-            {
-                'B': B.tolist(),
-                'beta': beta.tolist(),
-                'gamma': gamma.tolist(),
-                'Jmin': Jmin.tolist(),
-                'Jmax': Jmax.tolist()
-            },
-            yaml_file
-        )
+        yaml.dump({
+            'B': B.tolist(),
+            'beta': beta.tolist(),
+            'gamma': gamma.tolist(),
+            'Jmin': Jmin.tolist(),
+            'Jmax': Jmax.tolist()
+        }, yaml_file)

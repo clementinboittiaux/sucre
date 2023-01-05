@@ -420,7 +420,9 @@ def parse_args(args: argparse.Namespace):
                 image_names.append(colmap_model.images[image_id].name)
 
     if args.initialization == 'global':
-        utils.estimate_global_parameters(image_list=list(colmap_model.images.values()), output_dir=args.output_dir)
+        utils.estimate_global_parameters(
+            image_list=list(colmap_model.images.values()), output_dir=args.output_dir, device=args.device
+        )
 
     for image_name in image_names:
         sucre(
