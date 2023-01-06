@@ -407,6 +407,7 @@ def parse_args(args: argparse.Namespace):
     print('Loading COLMAP model.')
     colmap_model = sfm.COLMAPModel(model_dir=args.model_dir, image_dir=args.image_dir, depth_dir=args.depth_dir)
 
+    args.output_dir.mkdir(parents=True, exist_ok=True)
     filter_image_names = args.filter_images_path.read_text().splitlines() if args.filter_images_path else None
 
     if args.image_name is not None:
