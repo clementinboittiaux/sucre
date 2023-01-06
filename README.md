@@ -94,7 +94,7 @@ If `--initialization`  is `global`, these bounds were also computed using all im
 It defaults to 0, which means images are loaded in the main thread.
 We highly suggest you set this parameter to half the number of threads you have available.
 - `--device` sets the device for heavy computation.
-It defaults to `cpu`. **We highly recommend using `cuda`** if available.
+It defaults to `cpu`. **We highly recommend** using `cuda` if available.
 Restoring one image on CPU can take up to several hours.
 
 Example of .txt files for flags `--image-list` and `--filter-images-path`:
