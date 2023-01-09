@@ -12,6 +12,10 @@ of an underwater image formation model and then revert the model to restore the 
 the parameters of an underwater image formation model and the restored image.
 
 ## Requirements
+SUCRe relies on COLMAP's scripts to read models. After cloning the repository, don't forget need to pull submodules:
+```bash
+git submodule update --init
+```
 SUCRe requires Python >=3.10 with modules specified in [environment.yml](environment.yml).
 With [Anaconda](https://www.anaconda.com/) installed, one can build the environment by simply running:
 ```bash
