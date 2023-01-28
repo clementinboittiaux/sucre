@@ -119,7 +119,7 @@ Please consider citing our work if you use any code from this repository or idea
           Arnaubec, Aur\'elien and
           Ferrera, Maxime and
           Hugel, Vincent},
-  title={SUCRe: Leveraging Scene Structure for Underwater Color Restoration},
+  title={{SUCRe}: Leveraging Scene Structure for Underwater Color Restoration},
   publisher={arXiv},
   year={2022}
 }
