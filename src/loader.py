@@ -35,8 +35,15 @@ class Data:
     def __init__(self):
         self.data: list[dict[str, Tensor]] = []
 
-    def append(self, u: Tensor, v: Tensor, z: Tensor, Ic: Tensor):
-        self.data.append({'u': u, 'v': v, 'z': z, 'Ic': Ic})
+    def append(self, name: str, u: Tensor, v: Tensor, z: Tensor, Ic: Tensor):
+        self.data.append({
+            'name': name,
+            'i': torch.full((z.shape[0],), len(self.data), dtype=torch.int32),
+            'u': u,
+            'v': v,
+            'z': z,
+            'Ic': Ic
+        })
 
     def to_Ic_z(self, device: str = 'cpu') -> tuple[Tensor, Tensor]:
         z = torch.full((len(self),), torch.nan, dtype=torch.float32, device=device)
@@ -53,14 +60,19 @@ class Data:
         for sample in self.data:
             yield sample['u'].long(), sample['v'].long(), sample['z'], sample['Ic']
 
-    def iterbatch(self, batch_size: int) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    def iterbatch(self, batch_size: int) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         for i in range(0, len(self.data), batch_size):
             yield (
+                torch.hstack([sample['i'] for sample in self.data[i:i + batch_size]]).long(),
                 torch.hstack([sample['u'] for sample in self.data[i:i + batch_size]]).long(),
                 torch.hstack([sample['v'] for sample in self.data[i:i + batch_size]]).long(),
                 torch.hstack([sample['z'] for sample in self.data[i:i + batch_size]]),
                 torch.hstack([sample['Ic'] for sample in self.data[i:i + batch_size]])
             )
+
+    def get_image_idx(self, image: sfm.Image) -> int:
+        name2idx = {sample['name']: idx for idx, sample in enumerate(self.data)}
+        return name2idx[image.name]
 
     def __len__(self):
         return sum([sample['Ic'].shape[0] for sample in self.data])
@@ -100,6 +112,7 @@ class MatchesFile:
         with h5py.File(self.path, 'r', libver='latest') as f:
             for group in f.values():
                 data.append(
+                    name=group.name[1:],
                     u=torch.tensor(group['u1'][()], device=device),
                     v=torch.tensor(group['v1'][()], device=device),
                     z=torch.tensor(group['z'][()], device=device),

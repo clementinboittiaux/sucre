@@ -113,7 +113,7 @@ def levenberg_marquardt(
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
         device: str = 'cpu'
-) -> tuple[Tensor, float, float, float]:
+) -> tuple[Tensor, float, float, float, float]:
     print(f'Optimize Jc, Bc, betac and gammac in a Levenberg-Marquardt scheme ({max_iter} maximum iterations).')
     betac = torch.tensor(betac_init, dtype=torch.float32, device=device)
     gammac = torch.tensor(gammac_init, dtype=torch.float32, device=device)
@@ -156,7 +156,7 @@ def levenberg_marquardt(
         previous_cost = cost
 
     Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
-    return Jc.cpu(), Bc.item(), betac.item(), gammac.item()
+    return Jc.cpu(), Bc.item(), betac.item(), gammac.item(), 1.0
 
 
 def simplex(
@@ -166,7 +166,7 @@ def simplex(
         gammac_init: float,
         max_iter: int = 200,
         device: str = 'cpu'
-) -> tuple[Tensor, float, float, float]:
+) -> tuple[Tensor, float, float, float, float]:
     print(f'Optimize Jc, Bc, betac and gammac with Nelder-Mead simplex algorithm ({max_iter} maximum iterations).')
 
     def residuals(x):
@@ -188,38 +188,43 @@ def simplex(
     ).x.tolist()
     Bc, Jc = compute_Bc_Jc(image=image, data=data, betac=betac, gammac=gammac, device=device)
 
-    return Jc.cpu(), Bc.item(), betac, gammac
+    return Jc.cpu(), Bc.item(), betac, gammac, 1.0
 
 
 def adam(
         data: loader.Data,
+        image: sfm.Image,
         Jc_init: Tensor,
         Bc_init: float,
         betac_init: float,
         gammac_init: float,
         num_iter: int = 200,
-        batch_size: int = 1,
+        auto_white_balance: bool = False,
         device: str = 'cpu'
-) -> tuple[Tensor, float, float, float]:
+) -> tuple[Tensor, float, float, float, float]:
     print(f'Optimize Jc, Bc, betac and gammac with Adam optimizer ({num_iter} iterations).')
     Jc = torch.nn.Parameter(Jc_init.to(device))
     Bc = torch.nn.Parameter(torch.tensor(Bc_init, dtype=torch.float32, device=device))
     betac = torch.nn.Parameter(torch.tensor(betac_init, dtype=torch.float32, device=device))
     gammac = torch.nn.Parameter(torch.tensor(gammac_init, dtype=torch.float32, device=device))
+    wbc = torch.nn.Parameter(torch.ones(len(data.data), dtype=torch.float32, device=device), requires_grad=False)
 
-    optimizer = torch.optim.Adam([Jc, Bc, betac, gammac], lr=0.05)
+    optimizer = torch.optim.Adam([Jc, Bc, betac, gammac, wbc], lr=0.05)
 
     size = len(data)
     previous_cost = np.inf
 
     for iteration in range(num_iter):
 
+        if auto_white_balance and iteration == 400:
+            wbc.requires_grad = True
+
         cost = 0
         optimizer.zero_grad()
 
-        for ui, vi, zi, Iic in data.iterbatch(batch_size=batch_size):
+        for ii, ui, vi, zi, Iic in data.iterbatch(200):
             loss = torch.square(
-                Iic - Jc[vi, ui] * torch.exp(-betac * zi) - Bc * (1 - torch.exp(-gammac * zi))
+                Iic - wbc[ii] * (Jc[vi, ui] * torch.exp(-betac * zi) - Bc * (1 - torch.exp(-gammac * zi)))
             ).sum()
             (loss / size).backward()
             cost += loss.item()
@@ -227,11 +232,17 @@ def adam(
         optimizer.step()
         cost_change = np.abs(previous_cost - cost) / cost
 
-        print(f'iter: {iteration:04d}, cost: {cost:.8e}, cost change: {cost_change:.8e}, '
-              f'Bc: {Bc.item():.3e}, betac: {betac.item():.3e}, gammac: {gammac.item():.3e}')
+        with torch.no_grad():
+            print(f'iter: {iteration:04d}, cost: {cost:.8e}, cost change: {cost_change:.8e}, '
+                  f'Bc: {Bc.item():.3e}, betac: {betac.item():.3e}, gammac: {gammac.item():.3e}, '
+                  f'wbc mean: {wbc.mean().item():.3e}, wbc std: {torch.std(wbc).item():.3e}')
         previous_cost = cost
 
-    return Jc.detach().cpu(), Bc.item(), betac.item(), gammac.item()
+    with torch.no_grad():
+        wbic = wbc[data.get_image_idx(image)].item()
+    print(f'Image white balance: {wbic:.3e}')
+
+    return Jc.detach().cpu(), Bc.item(), betac.item(), gammac.item(), wbic
 
 
 def solve_sucre(
@@ -243,7 +254,7 @@ def solve_sucre(
         solver: str = 'lm',
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
-        batch_size: int = 1,
+        auto_white_balance: bool = False,
         outliers: str = 'single-view',
         device: str = 'cpu'
 ) -> tuple[Tensor, float, float, float, float, float]:
@@ -254,12 +265,12 @@ def solve_sucre(
     print(f'Bc: {Bc_init}, betac: {betac_init}, gammac: {gammac_init}')
 
     diverged = False
-    Jc, Bc, betac, gammac = None, None, None, None
+    Jc, Bc, betac, gammac, wbc = None, None, None, None, 1.0
 
     if max_iter > 0:
         match solver:
             case 'lm':
-                Jc, Bc, betac, gammac = levenberg_marquardt(
+                Jc, Bc, betac, gammac, wbc = levenberg_marquardt(
                     image=image,
                     data=data,
                     betac_init=betac_init,
@@ -269,7 +280,7 @@ def solve_sucre(
                     device=device
                 )
             case 'simplex':
-                Jc, Bc, betac, gammac = simplex(
+                Jc, Bc, betac, gammac, wbc = simplex(
                     image=image,
                     data=data,
                     betac_init=betac_init,
@@ -278,14 +289,15 @@ def solve_sucre(
                     device=device
                 )
             case 'adam':
-                Jc, Bc, betac, gammac = adam(
+                Jc, Bc, betac, gammac, wbc = adam(
                     data=data,
+                    image=image,
                     Jc_init=Jc_init,
                     Bc_init=Bc_init,
                     betac_init=betac_init,
                     gammac_init=gammac_init,
                     num_iter=max_iter,
-                    batch_size=batch_size,
+                    auto_white_balance=auto_white_balance,
                     device=device
                 )
             case _:
@@ -303,7 +315,7 @@ def solve_sucre(
     print(f'Bc: {Bc}, betac: {betac}, gammac: {gammac}')
 
     Jcmin, Jcmax = normalization.estimate_Jc_bounds(
-        data=data, image=image, channel=channel, Bc=Bc, betac=betac, gammac=gammac,
+        data=data, image=image, channel=channel, Bc=Bc, betac=betac, gammac=gammac, wbc=wbc,
         mode=outliers, params_path=params_path, device=device
     )
 
@@ -320,7 +332,7 @@ def sucre(
         solver: str = 'lm',
         max_iter: int = 200,
         function_tolerance: float = 1e-5,
-        batch_size: int = 1,
+        auto_white_balance: bool = False,
         outliers: str = 'single-view',
         force_compute_matches: bool = False,
         keep_matches: bool = False,
@@ -372,7 +384,7 @@ def sucre(
             solver=solver,
             max_iter=max_iter,
             function_tolerance=function_tolerance,
-            batch_size=batch_size,
+            auto_white_balance=auto_white_balance,
             outliers=outliers,
             device=device
         )
@@ -436,7 +448,7 @@ def parse_args(args: argparse.Namespace):
             solver=args.solver,
             max_iter=args.max_iter,
             function_tolerance=args.function_tolerance,
-            batch_size=args.batch_size,
+            auto_white_balance=args.auto_white_balance,
             outliers=args.outliers,
             force_compute_matches=args.force_compute_matches,
             keep_matches=args.keep_matches,
@@ -471,8 +483,9 @@ if __name__ == '__main__':
     parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
     parser.add_argument('--function-tolerance', type=float, default=1e-5,
                         help='stops optimization if cost function change is below this threshold.')
-    parser.add_argument('--batch-size', type=int, default=1,
-                        help='batch size for adam optimization, higher is faster but requires more RAM.')
+    parser.add_argument('--auto-white-balance', action='store_true',
+                        help='estimate white balance for each image if they have been captured '
+                             'with auto white balance (only available for adam optimizer).')
     parser.add_argument('--outliers', type=str,
                         choices=['global', 'single-view', 'multi-view', 'none'], default='single-view',
                         help='estimate expected minimum and maximum values of restored image to filter outliers.')

@@ -33,6 +33,7 @@ def estimate_Jc_bounds(
         Bc: float,
         betac: float,
         gammac: float,
+        wbc: float,
         mode: str = 'single-view',
         params_path: Path = None,
         device: str = 'cpu'
@@ -46,7 +47,7 @@ def estimate_Jc_bounds(
             Ic = loader.load_image(image.image_path)[:, :, channel].to(device)
             z = image.distance_map(loader.load_depth(image.depth_path).to(device))
             args_valid = z > 0
-            Ic = Ic[args_valid]
+            Ic = Ic[args_valid] / wbc
             z = z[args_valid]
         case 'multi-view':
             Ic, z = data.to_Ic_z(device=device)
