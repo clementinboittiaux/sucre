@@ -20,6 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import cv2
+import kornia
 import h5py
 import numpy as np
 import torch
@@ -158,7 +159,9 @@ def load_colmap_images(model_dir: Path) -> dict[int: read_write_model.Image]:
 
 
 def load_image(image_path: Path) -> Tensor:
-    return torch.tensor(cv2.cvtColor(cv2.imread(str(image_path)), cv2.COLOR_BGR2RGB)) / 255
+    image = torch.tensor(cv2.cvtColor(cv2.imread(str(image_path)), cv2.COLOR_BGR2RGB)) / 255
+    image = kornia.color.rgb_to_linear_rgb(image.movedim(2, 0)).movedim(0, 2)
+    return image
 
 
 def load_depth(depth_path: Path) -> Tensor:

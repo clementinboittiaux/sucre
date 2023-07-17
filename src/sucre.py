@@ -393,9 +393,9 @@ def sucre(
             yaml_file
         )
     Image.fromarray(
-        np.uint8(normalization.histogram_stretching(
+        np.uint8(normalization.tone_map(normalization.white_balance(
             normalization.filter_outliers(J=J, Jmin=Jmin, Jmax=Jmax)
-        ) * 255)
+        )) * 255)
     ).save((output_dir / image_name).with_suffix('.png'))
 
     if not keep_matches:

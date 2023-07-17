@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import kornia
 from torch import Tensor
 
 import loader
@@ -69,14 +70,14 @@ def estimate_Jc_bounds(
     return Jcmin.item(), torch.inf
 
 
-def filter_outliers(J: Tensor, Jmin: Tensor, Jmax: Tensor):
+def filter_outliers(J: Tensor, Jmin: Tensor, Jmax: Tensor) -> Tensor:
     J = J.clone()
     J[J < Jmin] = torch.nan
     J = J.clip(max=Jmax)
     return J
 
 
-def histogram_stretching(image: Tensor):
+def histogram_stretching(image: Tensor) -> np.array:
     image = image.numpy().copy()
     valid = np.all(~np.isnan(image), axis=2)
     image_valid = image[valid]
@@ -86,3 +87,22 @@ def histogram_stretching(image: Tensor):
     image[~valid] = 0
     image[valid] = image_valid
     return image
+
+
+def white_balance(image: Tensor) -> np.array:
+    image = image.numpy().copy()
+    valid = np.all(~np.isnan(image), axis=2)
+    image_valid = image[valid]
+    image_valid = image_valid / image_valid.mean(axis=0)
+    image_valid = np.clip(image_valid, np.percentile(image_valid, 3), np.percentile(image_valid, 97))
+    image_valid = image_valid - np.min(image_valid)
+    image_valid = image_valid / np.max(image_valid)
+    image[~valid] = 0
+    image[valid] = image_valid
+    return image
+
+
+def tone_map(image: np.array) -> np.array:
+    image = torch.tensor(image)
+    image = kornia.color.linear_rgb_to_rgb(image.movedim(2, 0)).movedim(0, 2)
+    return image.numpy()
