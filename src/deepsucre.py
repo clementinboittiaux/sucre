@@ -30,8 +30,6 @@ from torch import Tensor
 import loader
 import normalization
 import sfm
-import utils
-import sucre
 
 
 class VignettingData:
@@ -89,7 +87,7 @@ def deepsucre(
         output_dir: Path,
         min_cover: float,
         filter_image_names: list[str] = None,
-        max_iter: int = 200,
+        max_iter: int = 1000,
         batch_size: int = 1,
         force_compute_matches: bool = False,
         keep_matches: bool = False,
@@ -122,23 +120,14 @@ def deepsucre(
 
     print(f'Total of {len(matches_file)} observations.')
 
-    J = torch.full((image.camera.height, image.camera.width, 3), torch.nan, dtype=torch.float32)
-    B = torch.full((3, 1), torch.nan, dtype=torch.float32)
-    beta = torch.full((3, 1), torch.nan, dtype=torch.float32)
-    gamma = torch.full((3, 1), torch.nan, dtype=torch.float32)
-    for channel in range(3):
-        J[:, :, channel], B[channel], beta[channel], gamma[channel] = sucre.initialize_sucre_parameters(
-            data=matches_file.load_channel(channel, device=device),
-            image=image,
-            channel=channel,
-            params_path=output_dir / 'global.yml',
-            mode='global',
-            device=device
-        )
+    data = load_vignetting_data(matches_path, colmap_model, device=device)
+
+    J = loader.load_image(image.image_path)
+    J[loader.load_depth(image.depth_path) <= 0] = torch.nan
     J = torch.nn.Parameter(J.to(device))
-    B = torch.nn.Parameter(B.to(device))
-    beta = torch.nn.Parameter(beta.to(device))
-    gamma = torch.nn.Parameter(gamma.to(device))
+    B = torch.nn.Parameter(torch.tensor([[0.25], [0.25], [0.25]], dtype=torch.float32, device=device))
+    beta = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]], dtype=torch.float32, device=device))
+    gamma = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]], dtype=torch.float32, device=device))
     s_T_c = torch.nn.Parameter(torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=device))
     haloc = torch.nn.Parameter(torch.tensor(1.0, dtype=torch.float32, device=device))
     halox = torch.nn.Parameter(torch.tensor(-0.1, dtype=torch.float32, device=device))
@@ -146,7 +135,6 @@ def deepsucre(
 
     optimizer = torch.optim.Adam([J, B, beta, gamma, s_T_c, haloc, halox, haloy], lr=0.05)
 
-    data = load_vignetting_data(matches_path, colmap_model, device=device)
     size = len(data)
 
     for iteration in range(max_iter):
@@ -220,10 +208,6 @@ def parse_args(args: argparse.Namespace):
         for image_id in range(args.image_ids[0], args.image_ids[1] + 1):
             if image_id in colmap_model.images:
                 image_names.append(colmap_model.images[image_id].name)
-
-    utils.estimate_global_parameters(
-        image_list=list(colmap_model.images.values()), output_dir=args.output_dir, device=args.device
-    )
 
     for image_name in image_names:
         deepsucre(
