@@ -165,8 +165,8 @@ def deepsucre(
             print(
                 f'iter: {iteration:04d}, cost: {cost.item():.3e}, B: {B.detach().flatten().cpu().numpy()}, '
                 f'beta: {beta.detach().flatten().cpu().numpy()}, gamma: {gamma.detach().flatten().cpu().numpy()}, '
-                f't: {s_t_c.detach().flatten().cpu().numpy()}, '
-                f'halo: [{halostdx.item():.2e}, {halostdy.item():.2e}, {halocovxy.item():.2e}]'
+                f't: {s_t_c.detach().flatten().cpu().numpy()}, w: {s_T_c[:3].detach().flatten().cpu().numpy()}, '
+                f'halo: [{halostdx.item():.2f}, {halostdy.item():.2f}, {halocovxy.item():.2f}]'
             )
 
     print('-' * len(f'Save restored image in {output_dir}.'))
@@ -179,8 +179,8 @@ def deepsucre(
                 'B': B.flatten().tolist(),
                 'beta': beta.flatten().tolist(),
                 'gamma': gamma.flatten().tolist(),
-                's_T_c': s_T_c.tolist(),
-                'halo': [halostdx.item(), halostdy.item(), halocovxy.item()]
+                'lightpose': s_T_c.tolist(),
+                'lightsigma': [halostdx.item(), halostdy.item(), halocovxy.item()]
             },
             yaml_file
         )
