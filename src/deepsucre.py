@@ -107,7 +107,6 @@ def deepsucre(
 
     if force_compute_matches or not matches_path.exists():
         print(f'Compute {image_name} matches.')
-        # TODO: filter matches by distance
         image.match_images(
             image_list=image_list,
             matches_file=matches_file,
@@ -129,11 +128,11 @@ def deepsucre(
     beta = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]], dtype=torch.float32, device=device))
     gamma = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]], dtype=torch.float32, device=device))
     s_T_c = torch.nn.Parameter(torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=device))
-    haloc = torch.nn.Parameter(torch.tensor(1.0, dtype=torch.float32, device=device))
-    halox = torch.nn.Parameter(torch.tensor(-0.1, dtype=torch.float32, device=device))
-    haloy = torch.nn.Parameter(torch.tensor(-0.1, dtype=torch.float32, device=device))
+    halostdx = torch.nn.Parameter(torch.tensor(1.0, dtype=torch.float32, device=device))
+    halostdy = torch.nn.Parameter(torch.tensor(1.0, dtype=torch.float32, device=device))
+    halocovxy = torch.nn.Parameter(torch.tensor(0.0, dtype=torch.float32, device=device))
 
-    optimizer = torch.optim.Adam([J, B, beta, gamma, s_T_c, haloc, halox, haloy], lr=0.05)
+    optimizer = torch.optim.Adam([J, B, beta, gamma, s_T_c, halostdx, halostdy, halocovxy], lr=0.05)
 
     size = len(data)
 
@@ -143,12 +142,14 @@ def deepsucre(
         optimizer.zero_grad()
 
         s_R_c, s_t_c = se3_exp(s_T_c)
+        halocov = torch.stack([halostdx.square(), halocovxy, halocovxy, halostdy.square()]).view(2, 2)
 
         for ui, vi, zi, Ii, ciP in data.iterbatch(batch_size=batch_size):
             siP = s_R_c @ ciP + s_t_c
             sip = siP[:2] / siP[2]
+            sip = sip.T.unsqueeze(dim=2)
 
-            halo = haloc + halox * sip[0].square() + haloy * sip[1].square()
+            halo = torch.exp(-(sip.transpose(1, 2) @ halocov.inverse() @ sip).flatten() / 2)
 
             zi = zi + siP.norm(dim=0)
 
@@ -165,7 +166,7 @@ def deepsucre(
                 f'iter: {iteration:04d}, cost: {cost.item():.3e}, B: {B.detach().flatten().cpu().numpy()}, '
                 f'beta: {beta.detach().flatten().cpu().numpy()}, gamma: {gamma.detach().flatten().cpu().numpy()}, '
                 f't: {s_t_c.detach().flatten().cpu().numpy()}, '
-                f'halo: [{haloc.item():.2e}, {halox.item():.2e}, {haloy.item():.2e}]'
+                f'halo: [{halostdx.item():.2e}, {halostdy.item():.2e}, {halocovxy.item():.2e}]'
             )
 
     print('-' * len(f'Save restored image in {output_dir}.'))
@@ -179,7 +180,7 @@ def deepsucre(
                 'beta': beta.flatten().tolist(),
                 'gamma': gamma.flatten().tolist(),
                 's_T_c': s_T_c.tolist(),
-                'halo': [haloc.item(), halox.item(), haloy.item()]
+                'halo': [halostdx.item(), halostdy.item(), halocovxy.item()]
             },
             yaml_file
         )
