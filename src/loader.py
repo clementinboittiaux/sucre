@@ -72,28 +72,27 @@ class MatchesFile:
             path.unlink(missing_ok=True)
         self.path = path
 
-    def save_matches(self, matches: sfm.Matches):
+    def save_matches(self, matches: sfm.Matches, cP: Tensor):
         with h5py.File(self.path, 'a', libver='latest') as f:
             group = f.create_group(matches.image2.name)
             group.create_dataset('u1', data=matches.u1.short().cpu().numpy())
             group.create_dataset('v1', data=matches.v1.short().cpu().numpy())
             group.create_dataset('u2', data=matches.u2.short().cpu().numpy())
             group.create_dataset('v2', data=matches.v2.short().cpu().numpy())
-            group.create_dataset('z', data=np.full(len(matches), np.nan, dtype=np.float32))
+            group.create_dataset('cP', data=cP.cpu().numpy())
             group.create_dataset('I', data=np.full((3, len(matches)), np.nan, dtype=np.float32))
 
     def prepare_matches(self, colmap_model: sfm.COLMAPModel, num_workers: int = 0, device: str = 'cpu'):
         with h5py.File(self.path, 'r', libver='latest') as f:
             image_list = [colmap_model[group_name] for group_name in f.keys()]
         with h5py.File(self.path, 'r+', libver='latest') as f:
-            for image_idx, image_image, image_depth in tqdm.tqdm(load_images(image_list, num_workers=num_workers)):
+            for image_idx, image_rgb in tqdm.tqdm(
+                    load_image_list(image_list, return_depth=False, num_workers=num_workers)):
                 image = image_list[image_idx]
-                image_distance = image.distance_map(image_depth.to(device))
                 group = f[image.name]
                 u2 = torch.tensor(group['u2'][()], dtype=torch.int64)
                 v2 = torch.tensor(group['v2'][()], dtype=torch.int64)
-                group['z'][()] = image_distance[v2, u2].cpu().numpy()
-                group['I'][()] = image_image[v2, u2].T.numpy()
+                group['I'][()] = image_rgb[v2, u2].T.numpy()
 
     def load_channel(self, channel: int, device: str = 'cpu') -> Data:
         data = Data()
@@ -112,7 +111,7 @@ class MatchesFile:
         if self.path.exists():
             with h5py.File(self.path, 'r', libver='latest') as f:
                 for group in f.values():
-                    size += group['z'].shape[0]
+                    size += group['u1'].shape[0]
         return size
 
 
@@ -172,7 +171,7 @@ def load_depth(depth_path: Path) -> Tensor:
                              f'Only PNG, TIF and TIFF are supported.')
 
 
-def load_images(
+def load_image_list(
         image_list: list[sfm.Image],
         return_image: bool = True,
         return_depth: bool = True,

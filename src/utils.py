@@ -29,7 +29,7 @@ def estimate_global_parameters(image_list: list[sfm.Image], output_dir: Path, de
     bcp = [{'Ic': [], 'z': []}, {'Ic': [], 'z': []}, {'Ic': [], 'z': []}]
     n_obs = 0
     B = torch.zeros(3, dtype=torch.float32, device=device)
-    for image_idx, image_image, image_depth in tqdm.tqdm(loader.load_images(image_list, num_workers=10)):
+    for image_idx, image_image, image_depth in tqdm.tqdm(loader.load_image_list(image_list, num_workers=10)):
         image = image_list[image_idx]
         I = image_image.to(device)
         z = image.distance_map(image_depth.to(device))

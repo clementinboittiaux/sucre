@@ -87,8 +87,9 @@ class Image:
         self.pose = pose
         self.camera = camera
 
-    def unproject_depth_map(self, depth_map: Tensor, transform: bool = True) -> tuple[Tensor, Tensor, Tensor]:
-        v, u = torch.where(depth_map > 0)
+    def unproject_depth_map(self, depth_map: Tensor, vu: tuple[Tensor, Tensor] = None,
+                            transform: bool = True) -> tuple[Tensor, Tensor, Tensor]:
+        v, u = torch.where(depth_map > 0) if vu is None else vu
         uvw = torch.stack([u + 0.5, v + 0.5, torch.ones_like(u)])
         cp = uvw * depth_map[v, u]
         cP = self.camera.K_inv.to(cp.device) @ cp
@@ -125,12 +126,16 @@ class Image:
                      num_workers: int = 0, device: str = 'cpu'):
         u1, v1, wP1 = self.unproject_depth_map(loader.load_depth(self.depth_path).to(device))
         for other_idx, other_depth_map in tqdm.tqdm(
-                loader.load_images(image_list, return_image=False, num_workers=num_workers)):
+                loader.load_image_list(image_list, return_image=False, num_workers=num_workers)):
             other = image_list[other_idx]
-            u2, v2, wP2 = other.unproject_depth_map(other_depth_map.to(device))
+            other_depth_map = other_depth_map.to(device)
+            u2, v2, wP2 = other.unproject_depth_map(other_depth_map)
             other_matches = self.match_two_way(other, u1=u1, v1=v1, wP1=wP1, u2=u2, v2=v2, wP2=wP2)
             if len(other_matches) / (self.camera.width * self.camera.height) > min_cover:
-                matches_file.save_matches(other_matches)
+                _, _, cP2 = other.unproject_depth_map(
+                    other_depth_map, vu=(other_matches.v2, other_matches.u2), transform=False
+                )
+                matches_file.save_matches(matches=other_matches, cP=cP2)
 
     def __repr__(self) -> str:
         """String representation"""
