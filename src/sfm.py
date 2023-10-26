@@ -81,7 +81,7 @@ class Camera:
 class Image:
     def __init__(self, image_id: int, rgb_path: Path, depth_map_path: Path, pose: Pose, camera: Camera):
         self.id = image_id
-        self.name = rgb_path.name
+        self.name = str(rgb_path.name)
         self.rgb_path = rgb_path
         self.depth_map_path = depth_map_path
         self.pose = pose
