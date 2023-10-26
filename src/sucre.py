@@ -1,4 +1,4 @@
-# Copyright (C) 2022 Ifremer
+# Copyright (C) 2023 Ifremer
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -187,6 +187,9 @@ def restore_image(
         case _:
             raise ValueError('Currently, only `adam` optimizer is supported.')
 
+    sucre.plot_J().save((output_dir / image.name).with_suffix('.png'))
+    torch.save(sucre.cpu().state_dict(), (output_dir / image.name).with_suffix('.pt'))
+
     if not keep_matches:
         print(f'Erase {matches_path}.')
         matches_path.unlink()
@@ -259,9 +262,9 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', type=int, default=5,
                         help='batch size for adam optimization, higher is faster but requires more memory.')
     parser.add_argument('--save-interval', type=int,
-                        help='save restored image every given iterations steps.')
+                        help='save restored image every given optimization step.')
     parser.add_argument('--force-compute-matches', action='store_true',
-                        help='if matches file already exist, erase it and recompute matches.')
+                        help='if matches file already exists, erase it and recompute matches.')
     parser.add_argument('--keep-matches', action='store_true',
                         help='keep matches file (can take a lot a space).')
     parser.add_argument('--num-workers', type=int, default=0,
