@@ -93,9 +93,11 @@ class Image:
         cP = self.camera.K.to(cp.device).inverse() @ cp
         return cP
 
-    def depth_map_to_world(self, depth_map: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    def unproject_depth_map(self, depth_map: Tensor, to_world: bool = True) -> tuple[Tensor, Tensor, Tensor]:
         v, u = torch.where(depth_map > 0)
         cP = self.unproject_depth(u=u, v=v, d=depth_map[v, u])
+        if not to_world:
+            return u, v, cP
         wP = self.pose.transform(cP)
         return u, v, wP
 
@@ -125,12 +127,12 @@ class Image:
 
     def match_images(self, image_list: list[Image], matches_file: loader.MatchesFile, min_cover: float = 0.01,
                      num_workers: int = 0, device: str = 'cpu'):
-        u1, v1, wP1 = self.depth_map_to_world(self.get_depth_map().to(device))
+        u1, v1, wP1 = self.unproject_depth_map(self.get_depth_map().to(device), to_world=True)
         for other_idx, other_depth_map in tqdm.tqdm(
                 loader.load_image_list(image_list, return_rgb=False, num_workers=num_workers)):
             other = image_list[other_idx]
             other_depth_map = other_depth_map.to(device)
-            u2, v2, wP2 = other.depth_map_to_world(other_depth_map)
+            u2, v2, wP2 = other.unproject_depth_map(other_depth_map, to_world=True)
             other_matches = self.match_two_way(other, u1=u1, v1=v1, wP1=wP1, u2=u2, v2=v2, wP2=wP2)
             if len(other_matches) / (self.camera.width * self.camera.height) > min_cover:
                 d2 = other_depth_map[other_matches.v2, other_matches.u2]

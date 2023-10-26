@@ -25,44 +25,33 @@ import numpy as np
 import torch
 import tqdm
 from torch import Tensor
+from collections import namedtuple
 from torch.utils.data import Dataset, DataLoader
 
 import sfm
 
 
-# class Data:
-#     def __init__(self):
-#         self.data: list[dict[str, Tensor]] = []
-#
-#     def append(self, u: Tensor, v: Tensor, z: Tensor, Ic: Tensor):
-#         self.data.append({'u': u, 'v': v, 'z': z, 'Ic': Ic})
-#
-#     def to_Ic_z(self, device: str = 'cpu') -> tuple[Tensor, Tensor]:
-#         z = torch.full((len(self),), torch.nan, dtype=torch.float32, device=device)
-#         Ic = torch.full((len(self),), torch.nan, dtype=torch.float32, device=device)
-#         cursor = 0
-#         for sample in self.data:
-#             length = sample['z'].shape[0]
-#             z[cursor: cursor + length] = sample['z'].to(device)
-#             Ic[cursor: cursor + length] = sample['Ic'].to(device)
-#             cursor += length
-#         return Ic, z
-#
-#     def iter(self) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-#         for sample in self.data:
-#             yield sample['u'].long(), sample['v'].long(), sample['z'], sample['Ic']
-#
-#     def iterbatch(self, batch_size: int) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-#         for i in range(0, len(self.data), batch_size):
-#             yield (
-#                 torch.hstack([sample['u'] for sample in self.data[i:i + batch_size]]).long(),
-#                 torch.hstack([sample['v'] for sample in self.data[i:i + batch_size]]).long(),
-#                 torch.hstack([sample['z'] for sample in self.data[i:i + batch_size]]),
-#                 torch.hstack([sample['Ic'] for sample in self.data[i:i + batch_size]])
-#             )
-#
-#     def __len__(self):
-#         return sum([sample['Ic'].shape[0] for sample in self.data])
+MatchesSample = namedtuple('MatchesSample', ['u', 'v', 'cP', 'I'])
+
+
+class MatchesData:
+    def __init__(self):
+        self.data: list[MatchesSample] = []
+
+    def append(self, u: Tensor, v: Tensor, cP: Tensor, I: Tensor):
+        self.data.append(MatchesSample(u=u, v=v, cP=cP, I=I))
+
+    def iter(self, batch_size: int = 1, device: str = 'cpu') -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        for i in range(0, len(self.data), batch_size):
+            yield (
+                torch.hstack([sample.u.to(device) for sample in self.data[i:i + batch_size]]).long(),
+                torch.hstack([sample.v.to(device) for sample in self.data[i:i + batch_size]]).long(),
+                torch.hstack([sample.cP.to(device) for sample in self.data[i:i + batch_size]]),
+                torch.hstack([sample.I.to(device) for sample in self.data[i:i + batch_size]])
+            )
+
+    def __len__(self):
+        return sum([sample.u.shape[0] for sample in self.data])
 
 
 class MatchesFile:
@@ -112,54 +101,22 @@ class MatchesFile:
                         assert np.all(dataset_data > 0), \
                             f'In {self.path}, dataset {dataset.name} contains null of negative depth(s).'
 
-    def load_matches(self, image: sfm.Image,
-                     device: str = 'cpu') -> tuple[Tensor, Tensor]:
-        size = len(self)
-        i_idx = torch.zeros(size, dtype=torch.int64, device=device)
-        p_idx = torch.zeros(size, dtype=torch.int64, device=device)
-        cP = torch.zeros((3, size), dtype=torch.float32, device=device)
-        I = torch.zeros((3, size), dtype=torch.float32, device=device)
-
-        cursor = 0
+    def load_matches(self, pin_memory: bool = False) -> MatchesData:
+        matches_data = MatchesData()
         with h5py.File(self.path, 'r', libver='latest') as f:
-            for i, (group_name, group) in enumerate(f.items()):
-                u1 = torch.tensor(group['u1'][()], device=device, dtype=torch.int64)
-                v1 = torch.tensor(group['v1'][()], device=device, dtype=torch.int64)
-                length = u1.shape[0]
-                i_idx[cursor:cursor+length] = i
-                p_idx[cursor:cursor+length] = v1 * image.camera.width + u1
-                u2 = torch.tensor(group['u2'][()], device=device) + 0.5
-                v2 = torch.tensor(group['v2'][()], device=device) + 0.5
-                d = torch.tensor(group['d'][()], device=device)
-                cP[:, cursor:cursor+length] = image.unproject_depth(u=u2, v=v2, d=d)
-                I[:, cursor:cursor+length] = torch.tensor(group['I'][()], device=device)
-                cursor += length
-
-        cP = torch.sparse_coo_tensor(
-            indices=torch.stack([i_idx, p_idx]),
-            values=cP.T,
-            size=(i, image.camera.height * image.camera.width, 3)
-        ).coalesce()
-        I = torch.sparse_coo_tensor(
-            indices=torch.stack([i_idx, p_idx]),
-            values=I.T,
-            size=(i, image.camera.height * image.camera.width, 3)
-        ).coalesce()
-
-        return cP, I
-
-        # u, v, cP, I = [], [], [], []
-        # with h5py.File(self.path, 'r', libver='latest') as f:
-        #     for group_name, group in f.items():
-        #         image = self.colmap_model[group_name]
-        #         u.append(torch.tensor(group['u1'][()], device=device))
-        #         v.append(torch.tensor(group['v1'][()], device=device))
-        #         u2 = torch.tensor(group['u2'][()], device=device) + 0.5
-        #         v2 = torch.tensor(group['v2'][()], device=device) + 0.5
-        #         d = torch.tensor(group['d'][()], device=device)
-        #         cP.append(image.unproject_depth(u=u2, v=v2, d=d))
-        #         I.append(torch.tensor(group['I'][()], device=device))
-        # return u, v, cP, I
+            for group_name, group in f.items():
+                image = self.colmap_model[group_name]
+                u1 = torch.tensor(group['u1'][()])
+                v1 = torch.tensor(group['v1'][()])
+                u2 = torch.tensor(group['u2'][()]) + 0.5
+                v2 = torch.tensor(group['v2'][()]) + 0.5
+                d = torch.tensor(group['d'][()])
+                cP = image.unproject_depth(u=u2, v=v2, d=d)
+                I = torch.tensor(group['I'][()])
+                if pin_memory:
+                    u1, v1, cP, I = u1.pin_memory(), v1.pin_memory(), cP.pin_memory(), I.pin_memory()
+                matches_data.append(u=u1, v=v1, cP=cP, I=I)
+        return matches_data
 
     def __len__(self) -> int:
         size = 0
