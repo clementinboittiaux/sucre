@@ -20,31 +20,46 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
 from PIL import Image
+from scipy.optimize import minimize
 from torch import Tensor
 
 import loader
-import sfm
 import se3
+import sfm
 
 
 class SUCRe(torch.nn.Module):
-    def __init__(self, image: sfm.Image, light_model: bool = False):
+    def __init__(
+            self,
+            image: sfm.Image,
+            B: tuple[float, float, float] = (0.1, 0.1, 0.1),
+            beta: tuple[float, float, float] = (0.1, 0.1, 0.1),
+            gamma: tuple[float, float, float] = (0.1, 0.1, 0.1),
+            cam2light: tuple[float, float, float, float, float, float] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            sigma: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 1.0),
+            light_model: bool = False,
+            matches_data: loader.MatchesData = None,
+            device: str = 'cpu'
+    ):
         super().__init__()
         self.image = image
         self.light_model = light_model
-        self.J = torch.nn.Parameter(image.get_rgb())
-        with torch.no_grad():
-            self.J[image.get_depth_map() <= 0] = torch.nan
-        self.B = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]]))
-        self.beta = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]]))
-        self.gamma = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]]))
+        self.B = torch.nn.Parameter(torch.tensor(B, dtype=torch.float32, device=device).view(3, 1))
+        self.beta = torch.nn.Parameter(torch.tensor(beta, dtype=torch.float32, device=device).view(3, 1))
+        self.gamma = torch.nn.Parameter(torch.tensor(gamma, dtype=torch.float32, device=device).view(3, 1))
         if self.light_model:
-            self.cam2light = torch.nn.Parameter(torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
-            self.sigma = torch.nn.Parameter(torch.eye(2))
+            self.cam2light = torch.nn.Parameter(torch.tensor(cam2light, dtype=torch.float32, device=device))
+            self.sigma = torch.nn.Parameter(torch.tensor(sigma, dtype=torch.float32, device=device).view(2, 2))
+        with torch.no_grad():
+            if matches_data is not None:
+                self.J = torch.nn.Parameter(self.compute_J(matches_data))
+            else:
+                self.J = torch.nn.Parameter(image.get_rgb().to(device))
+                self.J[image.get_depth_map().to(device) <= 0] = torch.nan
 
     def compute_l_z(self, cP: Tensor) -> tuple[float | Tensor, Tensor]:
         z = cP.norm(dim=0)
@@ -55,7 +70,7 @@ class SUCRe(torch.nn.Module):
             lp = lP[:2] / lP[2]
             lp = lp.T.unsqueeze(dim=2)
             l = torch.exp(-torch.flatten(lp.transpose(1, 2) @ Sigma.inverse() @ lp) / 2)
-            z += lP.norm(dim=0)
+            z = z + lP.norm(dim=0)
         else:
             l = 1.0
         return l, z
@@ -106,15 +121,18 @@ class SUCRe(torch.nn.Module):
 
 
 def adam(
-        sucre: SUCRe,
+        image: sfm.Image,
         matches_data: loader.MatchesData,
+        light_model: bool = False,
         num_iter: int = 200,
         batch_size: int = 1,
         save_dir: Path = None,
         save_interval: int = None,
         device: str = 'cpu'
-):
+) -> SUCRe:
     print(f'Solve least squares with Adam optimizer ({num_iter} iterations).')
+    sucre = SUCRe(image=image, light_model=light_model, device=device)
+
     n_obs = len(matches_data)
     optimizer = torch.optim.Adam(sucre.parameters(), lr=0.05)
 
@@ -137,6 +155,65 @@ def adam(
             sucre.plot_J().save(save_path.with_stem(f'{save_path.stem}_rgb_{iteration:04d}'))
             if sucre.light_model:
                 sucre.plot_l().save(save_path.with_stem(f'{save_path.stem}_vignetting_{iteration:04d}'))
+    return sucre
+
+
+def simplex(
+        image: sfm.Image,
+        matches_data: loader.MatchesData,
+        light_model: bool = False,
+        max_iter: int = 200,
+        batch_size: int = 1,
+        device: str = 'cpu'
+) -> SUCRe:
+    print(f'Solve least squares with Nelder-Mead simplex algorithm ({max_iter} maximum iterations).')
+    n_obs = len(matches_data)
+
+    def build_sucre(x: list) -> SUCRe:
+        B_r, B_g, B_b, beta_r, beta_g, beta_b, gamma_r, gamma_g, gamma_b = x[:9]
+        cam2light, sigma = None, None
+        if light_model:
+            w1, w2, w3, p1, p2, p3, sigma11, sigma12, sigma21, sigma22 = x[9:]
+            cam2light = (w1, w2, w3, p1, p2, p3)
+            sigma = (sigma11, sigma12, sigma21, sigma22)
+        sucre_hat = SUCRe(
+            image=image,
+            B=(B_r, B_g, B_b),
+            beta=(beta_r, beta_g, beta_b),
+            gamma=(gamma_r, gamma_g, gamma_b),
+            cam2light=cam2light,
+            sigma=sigma,
+            light_model=light_model,
+            matches_data=matches_data,
+            device=device
+        )
+        return sucre_hat
+
+    def residuals(x: np.array) -> float:
+        sucre_hat = build_sucre(x.tolist())
+        cost = 0.0
+        for u, v, cP, I in matches_data.iter(batch_size=batch_size, device=device):
+            cost += torch.square(I - sucre_hat(u=u, v=v, cP=cP)).sum().item() / n_obs / 3
+        return cost
+
+    x0 = [0.1] * 9  # initial B, beta and gamma parameters for all color channels
+    bounds = [(1e-6, 5)] * 9  # bounds for B, beta and gamma parameters
+    if light_model:
+        x0 += [0.0] * 6  # initial se(3) camera to light pose
+        x0 += [1.0, 0.0, 0.0, 1.0]  # initial light pattern
+        bounds += [(-np.pi, np.pi)] * 3  # bounds for so(3) camera rotation
+        bounds += [(-100, 100)] * 3  # bounds for R3 camera translation
+        bounds += [(-100, 100)] * 4  # bounds for light pattern
+
+    with torch.no_grad():
+        sucre = build_sucre(minimize(
+            residuals,
+            np.array(x0),
+            method='BFGS',
+            # bounds=bounds,
+            options={'disp': True}
+        ).x.tolist())
+    return sucre
 
 
 def restore_image(
@@ -178,14 +255,15 @@ def restore_image(
     matches_data = matches_file.load_matches(pin_memory=True)
     print(f'Total of {len(matches_data)} observations.')
 
-    sucre = SUCRe(image=image, light_model=light_model).to(device)
-
     match solver:
         case 'adam':
-            adam(sucre=sucre, matches_data=matches_data, num_iter=max_iter, batch_size=batch_size,
-                 save_dir=output_dir, save_interval=save_interval, device=device)
+            sucre = adam(image=image, matches_data=matches_data, light_model=light_model, num_iter=max_iter,
+                         batch_size=batch_size, save_dir=output_dir, save_interval=save_interval, device=device)
+        case 'simplex':
+            sucre = simplex(image=image, matches_data=matches_data, light_model=light_model,
+                            max_iter=max_iter, batch_size=batch_size, device=device)
         case _:
-            raise ValueError('Currently, only `adam` optimizer is supported.')
+            raise ValueError('Currently, only `adam` and `simplex` optimizer are supported.')
 
     sucre.plot_J().save((output_dir / image.name).with_suffix('.png'))
     torch.save(sucre.cpu().state_dict(), (output_dir / image.name).with_suffix('.pt'))
@@ -269,6 +347,7 @@ if __name__ == '__main__':
                         help='keep matches file (can take a lot a space).')
     parser.add_argument('--num-workers', type=int, default=0,
                         help='number of threads, 0 is the main thread.')
-    parser.add_argument('--device', type=str, default='cpu', help='device for heavy computation.')
+    parser.add_argument('--device', type=str, default='cuda',
+                        help='device for heavy computation (`cpu` if cuda is not available).')
 
     parse_args(parser.parse_args())

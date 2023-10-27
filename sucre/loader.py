@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from collections import namedtuple
 from pathlib import Path
 
 import cv2
@@ -25,11 +26,9 @@ import numpy as np
 import torch
 import tqdm
 from torch import Tensor
-from collections import namedtuple
 from torch.utils.data import Dataset, DataLoader
 
 import sfm
-
 
 MatchesSample = namedtuple('MatchesSample', ['u', 'v', 'cP', 'I'])
 
