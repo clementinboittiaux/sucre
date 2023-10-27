@@ -125,7 +125,7 @@ class Image:
         matches2 = other.match_one_way(self, u1=u2, v1=v2, wP1=wP2)
         return matches1 & matches2
 
-    def match_images(self, image_list: list[Image], matches_file: loader.MatchesFile, min_cover: float = 0.01,
+    def match_images(self, image_list: list[Image], matches_file: loader.MatchesFile, min_cover: float = 0.000001,
                      num_workers: int = 0, device: str = 'cpu'):
         u1, v1, wP1 = self.unproject_depth_map(self.get_depth_map().to(device), to_world=True)
         for other_idx, other_depth_map in tqdm.tqdm(
