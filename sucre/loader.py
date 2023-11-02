@@ -107,8 +107,8 @@ class MatchesFile:
                 image = self.colmap_model[group_name]
                 u1 = torch.tensor(group['u1'][()])
                 v1 = torch.tensor(group['v1'][()])
-                u2 = torch.tensor(group['u2'][()]) + 0.5
-                v2 = torch.tensor(group['v2'][()]) + 0.5
+                u2 = torch.tensor(group['u2'][()])
+                v2 = torch.tensor(group['v2'][()])
                 d = torch.tensor(group['d'][()])
                 cP = image.unproject_depth(u=u2, v=v2, d=d)
                 I = torch.tensor(group['I'][()])
