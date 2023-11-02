@@ -108,6 +108,7 @@ class SUCRe(torch.nn.Module):
 def adam(
         sucre: SUCRe,
         matches_data: loader.MatchesData,
+        lr: float = 0.05,
         num_iter: int = 200,
         batch_size: int = 1,
         save_dir: Path = None,
@@ -117,7 +118,7 @@ def adam(
     print(f'Solve least squares with Adam optimizer ({num_iter} iterations).')
 
     n_obs = len(matches_data)
-    optimizer = torch.optim.Adam(sucre.parameters(), lr=0.05)
+    optimizer = torch.optim.Adam(sucre.parameters(), lr=lr)
 
     for iteration in range(num_iter):
         cost = 0
@@ -149,6 +150,7 @@ def restore_image(
         min_cover: float = 0.000001,
         image_list: list[sfm.Image] = None,
         solver: str = 'adam',
+        lr: float = 0.05,
         max_iter: int = 200,
         batch_size: int = 1,
         save_interval: int = None,
@@ -187,7 +189,7 @@ def restore_image(
 
     match solver:
         case 'adam':
-            adam(sucre=sucre, matches_data=matches_data, num_iter=max_iter, batch_size=batch_size,
+            adam(sucre=sucre, matches_data=matches_data, lr=lr, num_iter=max_iter, batch_size=batch_size,
                  save_dir=output_dir, save_interval=save_interval, device=device)
         case _:
             raise ValueError('Currently, only `adam` optimizer is supported.')
@@ -230,6 +232,7 @@ def parse_args(args: argparse.Namespace):
             min_cover=args.min_cover,
             image_list=image_list,
             solver=args.solver,
+            lr=args.learning_rate,
             max_iter=args.max_iter,
             batch_size=args.batch_size,
             save_interval=args.save_interval,
@@ -263,6 +266,8 @@ if __name__ == '__main__':
                              'discard when computing matches, one name per line.')
     parser.add_argument('--solver', type=str, choices=['adam'],
                         default='adam', help='method to solve SUCRe least squares.')
+    parser.add_argument('--learning-rate', type=float, default=0.05,
+                        help='learning rate for Adam optimizer.')
     parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
     parser.add_argument('--batch-size', type=int, default=5,
                         help='batch size for adam optimization, higher is faster but requires more memory.')

@@ -88,9 +88,8 @@ class Image:
         self.camera = camera
 
     def unproject_depth(self, u: Tensor, v: Tensor, d: Tensor) -> Tensor:
-        uvw = torch.stack([u + 0.5, v + 0.5, torch.ones_like(u)])
-        cp = uvw * d
-        cP = self.camera.K.to(cp.device).inverse() @ cp
+        cp = torch.stack([u + 0.5, v + 0.5, torch.ones_like(u)])
+        cP = self.camera.K.inverse().to(cp.device) @ (d * cp)
         return cP
 
     def unproject_depth_map(self, depth_map: Tensor, to_world: bool = True) -> tuple[Tensor, Tensor, Tensor]:
