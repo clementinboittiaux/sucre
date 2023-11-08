@@ -102,6 +102,15 @@ class SUCRe(torch.nn.Module):
         l_map[v, u] = l
         return Image.fromarray(np.uint8(plt.colormaps['jet'](l_map.cpu().numpy())[:, :, :3] * 255))
 
+    @torch.no_grad()
+    def plot_reconstruction(self):
+        u, v, cP = self.image.unproject_depth_map(
+            self.image.get_depth_map().to(self.B.device), to_world=False
+        )
+        I_reconstructed = torch.zeros((self.image.camera.height, self.image.camera.width, 3), device=cP.device)
+        I_reconstructed[v, u] = self(u=u, v=v, cP=cP).clip(0, 1).T
+        return Image.fromarray(np.uint8(I_reconstructed.cpu().numpy() * 255))
+
 
 def adam(
         sucre: SUCRe,
@@ -135,6 +144,7 @@ def adam(
         if save_dir is not None and save_interval is not None and iteration % save_interval == 0:
             save_path = (save_dir / sucre.image.name).with_suffix('.png')
             sucre.plot_J().save(save_path.with_stem(f'{save_path.stem}_rgb_{iteration:04d}'))
+            sucre.plot_reconstruction().save(save_path.with_stem(f'{save_path.stem}_rec_{iteration:04d}'))
             if sucre.light_model:
                 sucre.plot_l().save(save_path.with_stem(f'{save_path.stem}_vignetting_{iteration:04d}'))
 
