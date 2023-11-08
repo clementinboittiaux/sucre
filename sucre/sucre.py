@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+from tqdm import tqdm
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -111,6 +112,14 @@ class SUCRe(torch.nn.Module):
         I_reconstructed[v, u] = self(u=u, v=v, cP=cP).clip(0, 1).T
         return Image.fromarray(np.uint8(I_reconstructed.cpu().numpy() * 255))
 
+    def save_plots(self, save_dir: Path, iteration: int = None):
+        save_path = (save_dir / self.image.name).with_suffix('.png')
+        suffix = '' if iteration is None else f'_{iteration:04d}'
+        self.plot_J().save(save_path.with_stem(f'{save_path.stem}_rgb{suffix}'))
+        self.plot_reconstruction().save(save_path.with_stem(f'{save_path.stem}_reconstruction{suffix}'))
+        if self.light_model:
+            self.plot_l().save(save_path.with_stem(f'{save_path.stem}_vignetting{suffix}'))
+
 
 def adam(
         sucre: SUCRe,
@@ -126,7 +135,7 @@ def adam(
     n_obs = len(matches_data)
     optimizer = torch.optim.Adam(sucre.parameters(), lr=lr)
 
-    for iteration in range(num_iter):
+    for iteration in tqdm(range(num_iter)):
         cost = 0
         optimizer.zero_grad()
         sucre.update_J(matches_data=matches_data)
@@ -138,15 +147,11 @@ def adam(
 
         optimizer.step()
         with np.printoptions(precision=4):
-            print(f'iter: {iteration:04d}, cost: {cost:.4e}, B: {sucre.B.detach().cpu().flatten().numpy()}, '
-                  f'beta: {sucre.beta.detach().cpu().flatten().numpy()}, '
-                  f'gamma: {sucre.gamma.detach().cpu().flatten().numpy()}')
+            tqdm.write(f'iter: {iteration:04d}, cost: {cost:.4e}, B: {sucre.B.detach().cpu().flatten().numpy()}, '
+                       f'beta: {sucre.beta.detach().cpu().flatten().numpy()}, '
+                       f'gamma: {sucre.gamma.detach().cpu().flatten().numpy()}')
         if save_dir is not None and save_interval is not None and iteration % save_interval == 0:
-            save_path = (save_dir / sucre.image.name).with_suffix('.png')
-            sucre.plot_J().save(save_path.with_stem(f'{save_path.stem}_rgb_{iteration:04d}'))
-            sucre.plot_reconstruction().save(save_path.with_stem(f'{save_path.stem}_rec_{iteration:04d}'))
-            if sucre.light_model:
-                sucre.plot_l().save(save_path.with_stem(f'{save_path.stem}_vignetting_{iteration:04d}'))
+            sucre.save_plots(save_dir=save_dir, iteration=iteration)
 
     sucre.update_J(matches_data=matches_data)
     return sucre
@@ -164,6 +169,7 @@ def restore_image(
         num_iter: int = 200,
         batch_size: int = 1,
         save_interval: int = None,
+        params_path: Path = None,
         force_compute_matches: bool = False,
         keep_matches: bool = False,
         num_workers: int = 0,
@@ -197,10 +203,13 @@ def restore_image(
 
     sucre = SUCRe(image=image, light_model=light_model, use_closed_form=use_closed_form).to(device)
 
+    if params_path is not None:
+        sucre.load_state_dict(torch.load(params_path), strict=False)
+
     adam(sucre=sucre, matches_data=matches_data, lr=lr, num_iter=num_iter, batch_size=batch_size,
          save_dir=output_dir, save_interval=save_interval, device=device)
 
-    sucre.plot_J().save((output_dir / image.name).with_suffix('.png'))
+    sucre.save_plots(save_dir=output_dir)
     torch.save({
         **sucre.cpu().state_dict(), 'J': sucre.J.detach().cpu()
     }, (output_dir / image.name).with_suffix('.pt'))
@@ -244,6 +253,7 @@ def parse_args(args: argparse.Namespace):
             num_iter=args.num_iter,
             batch_size=args.batch_size,
             save_interval=args.save_interval,
+            params_path=args.params_path,
             force_compute_matches=args.force_compute_matches,
             keep_matches=args.keep_matches,
             num_workers=args.num_workers,
@@ -283,6 +293,8 @@ if __name__ == '__main__':
                         help='batch size for adam optimization, higher is faster but requires more memory.')
     parser.add_argument('--save-interval', type=int,
                         help='save restored image every given optimization step.')
+    parser.add_argument('--params-path', type=Path,
+                        help='load underwater image formation model parameters from .pt file.')
     parser.add_argument('--force-compute-matches', action='store_true',
                         help='if matches file already exists, erase it and recompute matches.')
     parser.add_argument('--keep-matches', action='store_true',
