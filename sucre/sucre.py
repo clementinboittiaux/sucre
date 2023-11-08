@@ -32,19 +32,21 @@ import sfm
 
 
 class SUCRe(torch.nn.Module):
-    def __init__(self, image: sfm.Image, light_model: bool = False):
+    def __init__(self, image: sfm.Image, light_model: bool = False, use_closed_form: bool = False):
         super().__init__()
         self.image = image
         self.light_model = light_model
-        self.J = torch.nn.Parameter(image.get_rgb())
-        with torch.no_grad():
-            self.J[image.get_depth_map() <= 0] = torch.nan
+        self.use_closed_form = use_closed_form
         self.B = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]]))
         self.beta = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]]))
         self.gamma = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]]))
-        if self.light_model:
+        if light_model:
             self.cam2light = torch.nn.Parameter(torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
             self.sigma = torch.nn.Parameter(torch.eye(2))
+        if not use_closed_form:
+            self.J = image.get_rgb()
+            self.J[image.get_depth_map() <= 0] = torch.nan
+            self.J = torch.nn.Parameter(self.J)
 
     def compute_l_z(self, cP: Tensor) -> tuple[float | Tensor, Tensor]:
         z = cP.norm(dim=0)
@@ -55,24 +57,23 @@ class SUCRe(torch.nn.Module):
             lp = lP[:2] / lP[2]
             lp = lp.T.unsqueeze(dim=2)
             l = torch.exp(-torch.flatten(lp.transpose(1, 2) @ Sigma.inverse() @ lp) / 2)
-            z = z + lP.norm(dim=0)
+            z += lP.norm(dim=0)
         else:
             l = 1.0
         return l, z
 
-    def compute_J(self, matches_data: loader.MatchesData) -> Tensor:
-        J_numerator = torch.zeros((self.image.camera.height, self.image.camera.width, 3), device=self.B.device)
-        J_denominator = torch.zeros((self.image.camera.height, self.image.camera.width, 3), device=self.B.device)
-
-        for u, v, cP, I in matches_data.iter(device=self.B.device):
-            l, z = self.compute_l_z(cP)
-            absorption = l * torch.exp(-self.beta * z)
-            backscatter = l * self.B * (1 - torch.exp(-self.gamma * z))
-            J_numerator[v, u] += ((I - backscatter) * absorption).T
-            J_denominator[v, u] += absorption.square().T
-
-        J = J_numerator / J_denominator
-        return J
+    @torch.no_grad()
+    def update_J(self, matches_data: loader.MatchesData, force_update: bool = False):
+        if self.use_closed_form or force_update:
+            J_numerator = torch.zeros((self.image.camera.height, self.image.camera.width, 3), device=self.B.device)
+            J_denominator = torch.zeros((self.image.camera.height, self.image.camera.width, 3), device=self.B.device)
+            for u, v, cP, I in matches_data.iter(device=self.B.device):
+                l, z = self.compute_l_z(cP)
+                absorption = l * torch.exp(-self.beta * z)
+                backscatter = l * self.B * (1 - torch.exp(-self.gamma * z))
+                J_numerator[v, u] += ((I - backscatter) * absorption).T
+                J_denominator[v, u] += absorption.square().T
+            self.J = J_numerator / J_denominator
 
     def forward(self, u: Tensor, v: Tensor, cP: Tensor) -> Tensor:
         l, z = self.compute_l_z(cP)
@@ -80,11 +81,8 @@ class SUCRe(torch.nn.Module):
         return I_hat
 
     @torch.no_grad()
-    def plot_J(self, matches_data: loader.MatchesData = None):
-        if matches_data is None:
-            J = self.J.cpu().numpy().copy()
-        else:
-            J = self.compute_J(matches_data).cpu().numpy()
+    def plot_J(self):
+        J = self.J.cpu().numpy().copy()
         valid = np.all(~np.isnan(J), axis=2)
         J_valid = J[valid]
         J_valid = np.clip(J_valid, np.percentile(J_valid, 1, axis=0), np.percentile(J_valid, 99, axis=0))
@@ -116,13 +114,13 @@ def adam(
         device: str = 'cpu'
 ) -> SUCRe:
     print(f'Solve least squares with Adam optimizer ({num_iter} iterations).')
-
     n_obs = len(matches_data)
     optimizer = torch.optim.Adam(sucre.parameters(), lr=lr)
 
     for iteration in range(num_iter):
         cost = 0
         optimizer.zero_grad()
+        sucre.update_J(matches_data=matches_data)
 
         for u, v, cP, I in matches_data.iter(batch_size=batch_size, device=device):
             loss = torch.square(I - sucre(u=u, v=v, cP=cP)).sum()
@@ -139,6 +137,8 @@ def adam(
             sucre.plot_J().save(save_path.with_stem(f'{save_path.stem}_rgb_{iteration:04d}'))
             if sucre.light_model:
                 sucre.plot_l().save(save_path.with_stem(f'{save_path.stem}_vignetting_{iteration:04d}'))
+
+    sucre.update_J(matches_data=matches_data)
     return sucre
 
 
@@ -147,11 +147,11 @@ def restore_image(
         colmap_model: sfm.COLMAPModel,
         output_dir: Path,
         light_model: bool = False,
+        use_closed_form: bool = False,
         min_cover: float = 0.000001,
         image_list: list[sfm.Image] = None,
-        solver: str = 'adam',
         lr: float = 0.05,
-        max_iter: int = 200,
+        num_iter: int = 200,
         batch_size: int = 1,
         save_interval: int = None,
         force_compute_matches: bool = False,
@@ -185,17 +185,15 @@ def restore_image(
     matches_data = matches_file.load_matches(pin_memory=False if device == 'cpu' else True)
     print(f'Total of {len(matches_data)} observations.')
 
-    sucre = SUCRe(image=image, light_model=light_model).to(device)
+    sucre = SUCRe(image=image, light_model=light_model, use_closed_form=use_closed_form).to(device)
 
-    match solver:
-        case 'adam':
-            adam(sucre=sucre, matches_data=matches_data, lr=lr, num_iter=max_iter, batch_size=batch_size,
-                 save_dir=output_dir, save_interval=save_interval, device=device)
-        case _:
-            raise ValueError('Currently, only `adam` optimizer is supported.')
+    adam(sucre=sucre, matches_data=matches_data, lr=lr, num_iter=num_iter, batch_size=batch_size,
+         save_dir=output_dir, save_interval=save_interval, device=device)
 
     sucre.plot_J().save((output_dir / image.name).with_suffix('.png'))
-    torch.save(sucre.cpu().state_dict(), (output_dir / image.name).with_suffix('.pt'))
+    torch.save({
+        **sucre.cpu().state_dict(), 'J': sucre.J.detach().cpu()
+    }, (output_dir / image.name).with_suffix('.pt'))
 
     if not keep_matches:
         print(f'Erase {matches_path}.')
@@ -229,11 +227,11 @@ def parse_args(args: argparse.Namespace):
             colmap_model=colmap_model,
             output_dir=args.output_dir,
             light_model=args.light_model,
+            use_closed_form=args.use_closed_form,
             min_cover=args.min_cover,
             image_list=image_list,
-            solver=args.solver,
             lr=args.learning_rate,
-            max_iter=args.max_iter,
+            num_iter=args.num_iter,
             batch_size=args.batch_size,
             save_interval=args.save_interval,
             force_compute_matches=args.force_compute_matches,
@@ -256,19 +254,21 @@ if __name__ == '__main__':
     parser_images.add_argument('--image-list', type=Path,
                                help='path to .txt file with names of images to restore, one name per line.')
     parser_images.add_argument('--image-ids', type=int, nargs=2, metavar=('MIN_ID', 'MAX_ID'),
-                               help='range of ids of images to restore in the COLMAP model [min, max].')
+                               help='range of ids of images to restore in the COLMAP model [min, max).')
     parser.add_argument('--light-model', action='store_true', help='model artificial lights.')
+    parser.add_argument('--use-closed-form', action='store_true',
+                        help='use the partial closed-form solution for computing the restored image from '
+                             'absorption, backscatter and light parameters.')
     parser.add_argument('--min-cover', type=float, default=0.000001,
                         help='minimum percentile of shared observations to keep the pairs of an image.')
-    parser.add_argument('--image-scale', type=float, default=1.0, help='rescale all images by this factor.')
+    parser.add_argument('--image-scale', type=float, default=1.0,
+                        help='rescale all images by this factor.')
     parser.add_argument('--filter-images-path', type=Path,
                         help='path to a .txt file with names of images to '
                              'discard when computing matches, one name per line.')
-    parser.add_argument('--solver', type=str, choices=['adam'],
-                        default='adam', help='method to solve SUCRe least squares.')
     parser.add_argument('--learning-rate', type=float, default=0.05,
                         help='learning rate for Adam optimizer.')
-    parser.add_argument('--max-iter', type=int, default=200, help='maximum number of optimization steps.')
+    parser.add_argument('--num-iter', type=int, default=200, help='number of optimization steps.')
     parser.add_argument('--batch-size', type=int, default=5,
                         help='batch size for adam optimization, higher is faster but requires more memory.')
     parser.add_argument('--save-interval', type=int,
