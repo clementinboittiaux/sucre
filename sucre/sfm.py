@@ -152,8 +152,8 @@ class Matches:
         self.v2 = v2
 
     def map(self):
-        match_map = torch.zeros((self.image1.camera.height, self.image1.camera.width, 2),
-                                device=self.u1.device, dtype=self.u1.dtype)
+        match_map = torch.full((self.image1.camera.height, self.image1.camera.width, 2),
+                               -1, device=self.u1.device, dtype=self.u1.dtype)
         match_map[self.v1, self.u1, 0] = self.v2
         match_map[self.v1, self.u1, 1] = self.u2
         return match_map
