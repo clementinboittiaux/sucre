@@ -18,7 +18,7 @@ can be installed using pip:
 pip install -r requirements.txt
 ```
 
-## Inputs
+## Input data
 The [sucre.py](sucre/sucre.py) script takes as input three directories:
 - A directory containing the undistorted underwater images.
 - A directory containing the depth maps.
