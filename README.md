@@ -1,67 +1,76 @@
-# SUCRe
+# SUCRe: Leveraging Scene Structure for Underwater Color Restoration
 
-This repository implements **SUCRe** and __Gaussian *Sea-thru*__ presented in
-[SUCRe: Leveraging Scene Structure for Underwater Color Restoration](https://arxiv.org/abs/2212.09129).
+[Paper](https://arxiv.org/abs/2212.09129) • [Project page](https://clementinboittiaux.github.io/sucre/)
+
+This repository implements [SUCRe](https://arxiv.org/abs/2212.09129), a multi-view method that uses a dense scene
+reconstruction for underwater color restoration.
 
 <img src="https://user-images.githubusercontent.com/74063264/208756825-6c9ca9db-e75e-48ee-8ae3-6fb632ad3d02.gif" width="100%" alt=""/>
 
-Both methods make use of the scene's structure to restore colors of underwater images.
-- __Gaussian *Sea-thru*__ relies on a single image and its corresponding distance map to estimate the parameters
-of an underwater image formation model and then revert the model to restore the image.
-- **SUCRe** uses multiple images alongside their 6-DoF pose and intrinsics parameters to simultaneously estimate
-the parameters of an underwater image formation model and the restored image.
+This implementation requires undistorted underwater images along with their corresponding depth maps and a
+[COLMAP](https://colmap.github.io/) model of the scene.
 
-## Requirements
-SUCRe relies on COLMAP's scripts to read models. After cloning the repository, don't forget need to pull submodules:
+## Installation
+SUCRe requires Python >=3.10 and [PyTorch](https://pytorch.org/)>=2.1.0. [PyTorch](https://pytorch.org/) should be
+installed independently for GPU compatibility. All other modules are listed in [requirements.txt](requirements.txt) and
+can be installed using pip: 
 ```bash
-git submodule update --init
+pip install -r requirements.txt
 ```
-SUCRe requires Python >=3.10 with modules specified in [environment.yml](environment.yml).
-With [Anaconda](https://www.anaconda.com/) installed, one can build the environment by simply running:
-```bash
-conda env create -f environment.yml
-conda activate sucre
-```
-SUCRe also requires [PyTorch](https://pytorch.org/) which must be installed manually for GPU compatibility.
 
 ## Inputs
-Both scripts take as inputs the paths of three directories:
+The [sucre.py](sucre/sucre.py) script takes as input three directories:
 - A directory containing the undistorted underwater images.
-- A directory containing the depth maps of the images in single channel PNG format. Depth maps should be encoded on 
-16 bits and depth information should be in millimeters. They should have the same name as their corresponding
-images preceded by `depth_`. For example, the depth map of `image001.jpg` should be named `depth_image001.png`. 
-- A directory containing the [COLMAP model](https://colmap.github.io/format.html) of the scene with all cameras
-expressed in a `PINHOLE` camera model.
+- A directory containing the depth maps.
+- A directory containing the [COLMAP](https://colmap.github.io/format.html) model of the scene.
 
-All of this information about the scene can be retrieved with the following pipeline:
-1. Run [COLMAP](https://colmap.github.io/) on your set of underwater images.
-2. Run COLMAP's `image_undistorter` to retrieve the undistorted images as well as the COLMAP
-model with PINHOLE camera model.  
-3. Build a 3D mesh from the undistorted COLMAP model using [OpenMVS](https://github.com/cdcseacave/openMVS/).  
-4. Use [Maxime Ferrera's raycasting repository](https://github.com/ferreram/depth_map_2_mesh_ray_tracer/) to recover the depth maps from the undistorted COLMAP model and the 3D mesh.
-
-## Gaussian *Sea-thru*
-Run Gaussian *Sea-thru* on images of your dataset:
-```bash
-python gaussian_seathru.py
-    --image-dir <path to directory containing underwater images>
-    --depth-dir <path to directory containing depth maps>
-    --model-dir <path to directory containing COLMAP model>
-    --output-dir <path to output directory>
-    --image-name <name of image to restore>
+### Data format
+The directory containing undistorted underwater images can be arbitrarily organized:
 ```
-Optional flags:
-- `--linear-beta` switches to SUCRe image formation model.
-- `--device` sets the device on which the optimization is performed. It defaults to `cpu`
-but we suggest using `cuda` if available to speed the process.
+images
+├─ image001.jpg
+├─ image002.jpg
+└─ ...
+```
 
-## SUCRe
-Run SUCRe on images of your dataset:
+Depth maps should be encoded in 16-bits single channel PNG format. The depth information should be stored in
+millimeters. Depth maps should have the same name as their corresponding images preceded by `depth_`. For example, the
+depth map of `image001.jpg` should be named `depth_image001.png`:
+```
+depths
+├─ depth_image001.png
+├─ depth_image002.png
+└─ ...
+```
+
+The [COLMAP](https://colmap.github.io/format.html) model consists of three files in either `.bin` or `.txt` format. Because underwater images are undistorted,
+all intrinsic parameters are expected to use a `PINHOLE` camera model:
+```
+sparse
+├─ cameras.bin
+├─ images.bin
+└─ points3D.bin
+```
+
+### Data processing pipeline
+All the data required to run SUCRe **can be retrieved from you own set of underwater images** by following this pipeline:
+1. Run [COLMAP](https://colmap.github.io/) on your set of underwater images.
+2. Run `colmap image_undistorter` to retrieve the undistorted images and
+[COLMAP](https://colmap.github.io/format.html) model.  
+3. Build a dense 3D mesh from the undistorted [COLMAP](https://colmap.github.io/format.html) model using
+[OpenMVS](https://github.com/cdcseacave/openMVS/).  
+4. Use [Maxime Ferrera's script](https://github.com/ferreram/depth_map_2_mesh_ray_tracer/) to compute depth maps from the
+undistorted [COLMAP](https://colmap.github.io/format.html) model and the 3D mesh.
+
+Following these steps will ensure you have all the necessary information in the correct format. 
+
+## Usage
+To run SUCRe on your own set of images, simply run the [sucre.py](sucre/sucre.py) script with the following arguments:
 ```bash
 python sucre.py
-    --image-dir <path to directory containing underwater images>
-    --depth-dir <path to directory containing depth maps>
-    --model-dir <path to directory containing COLMAP model>
+    --image-dir <path to the directory containing the undistorted underwater images>
+    --depth-dir <path to the directory containing the depth maps>
+    --model-dir <path to the directory containing the undistorted COLMAP model>
     --output-dir <path to output directory>
     (
         --image-name <name of image to restore>
@@ -71,56 +80,27 @@ python sucre.py
         --image-ids <min image id> <max image id>
     )
 ```
-Optional flags:
-- `--min-cover` sets the minimum percentile of shared observations to keep the pairs of an image.
-- `--filter-images-path` is a path to a .txt file with names of images to discard during image matching.
-- `--initialization` defines how the parameters of the underwater image formation model and the restored image are
-initialized. It defaults to `global`, which uses dark and bright channel priors on all images of the dataset.
-Parameters can also be initialized with Gaussian *Sea-thru* using only the image to be restored (`single-view`)
-or all matched images (`multi-view`).
-- `--solver` specifies which optimization method to use for solving SUCRe's least square.
-It defaults to Adam optimizer (`adam`). Other available options are Levenberg-Marquardt (`lm`) and
-Nelder-Mead simplex algorithm (`simplex`).
-- `--max-iter` sets the maximum number of optimization iterations.
-- `--function-tolerance` defines the absolute cost change threshold under which to stop the optimization.
-This option has no effects for Adam optimizer.
-- `--batch-size` defines the batch size for Adam optimizer.
-A larger batch size leads to a faster optimization but requires more memory.
-This option has no effects on the resulting image or image formation model parameters.
-- `--outliers` specifies the method to filter outliers before normalizing the restored image.
-Low intensity bounds of the restored image are retrieved with dark channel prior using either
-a single image (`single-view`, default) or all matched images (`multi-view`).
-If `--initialization`  is `global`, these bounds were also computed using all images (`global`).
-- `--force-compute-matches` forces SUCRe to recompute matches even if the matches file of the image already exists.
-- `--keep-matches` prevents SUCRe from deleting the matches file at the end of the optimization.
-**Warning:** this can take a lot of space.
-- `--num-workers` sets the number of threads to load images.
-It defaults to 0, which means images are loaded in the main thread.
-We highly suggest you set this parameter to half the number of threads you have available.
-- `--device` sets the device for heavy computation.
-It defaults to `cpu`. **We highly recommend** using `cuda` if available.
-Restoring one image on CPU can take up to several hours.
 
-Example of .txt files for flags `--image-list` and `--filter-images-path`:
+The `--image-list` flag takes as input a `.txt` file with the following format:
 ```text
-someimage.png
-anotherimage.png
+image001.jpg
+image012.jpg
 ...
 ```
 
-## BibTex citation
+Other options are available with documentation by running the script with the `-h` flag:
+```bash
+python sucre.py -h
+```
+
+## BibTeX citation
 Please consider citing our work if you use any code from this repository or ideas presented in the paper:
 
 ```
-@misc{boittiaux2022sucre,
-  author={Boittiaux, Cl\'ementin and
-          Marxer, Ricard and
-          Dune, Claire and
-          Arnaubec, Aur\'elien and
-          Ferrera, Maxime and
-          Hugel, Vincent},
-  title={{SUCRe}: Leveraging Scene Structure for Underwater Color Restoration},
-  publisher={arXiv},
-  year={2022}
+@inproceedings{boittiaux2024sucre,
+    author={Boittiaux, Cl\'ementin and Marxer, Ricard and Dune, Claire and Arnaubec, Aur\'elien and Ferrera, Maxime and Hugel, Vincent},
+    title={{SUCRe}: Leveraging Scene Structure for Underwater Color Restoration},
+    booktitle={3DV},
+    year={2024}
 }
 ```
