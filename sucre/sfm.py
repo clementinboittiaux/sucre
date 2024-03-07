@@ -189,7 +189,7 @@ class COLMAPModel:
 
         self.cameras = {}
         for camera in reconstruction.cameras.values():
-            assert camera.model_name == 'PINHOLE', f'Camera {camera} is not using the PINHOLE model.'
+            assert camera.model.name == 'PINHOLE', f'Camera {camera} is not using the PINHOLE model.'
             width = int(camera.width * image_scale)
             height = int(camera.height * image_scale)
             scale_w = width / camera.width
@@ -217,8 +217,8 @@ class COLMAPModel:
                 rgb_path=rgb_path,
                 depth_map_path=depth_map_path,
                 pose=Pose(
-                    R=torch.tensor(image.rotmat(), dtype=torch.float32),
-                    t=torch.tensor(image.tvec, dtype=torch.float32).view(3, 1)
+                    R=torch.tensor(image.cam_from_world.rotation.matrix(), dtype=torch.float32),
+                    t=torch.tensor(image.cam_from_world.translation, dtype=torch.float32).view(3, 1)
                 ).inverse(),
                 camera=self.cameras[image.camera_id]
             )
