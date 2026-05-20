@@ -64,20 +64,18 @@ class SUCRe(torch.nn.Module):
         return l, z
 
     @torch.no_grad()
-    def update_J(self, matches_data: loader.MatchesData, force_update: bool = False):
+    def update_J(self, matches_data: loader.MatchesData, l: float | Tensor, z: Tensor, force_update: bool = False):
         if self.use_closed_form or force_update:
+            absorption = l * torch.exp(-self.beta * z)
+            backscatter = l * self.B * (1 - torch.exp(-self.gamma * z))
             J_numerator = torch.zeros((self.image.camera.height, self.image.camera.width, 3), device=self.B.device)
             J_denominator = torch.zeros((self.image.camera.height, self.image.camera.width, 3), device=self.B.device)
-            for u, v, cP, I in matches_data.iter(device=self.B.device):
-                l, z = self.compute_l_z(cP)
-                absorption = l * torch.exp(-self.beta * z)
-                backscatter = l * self.B * (1 - torch.exp(-self.gamma * z))
-                J_numerator[v, u] += ((I - backscatter) * absorption).T
-                J_denominator[v, u] += absorption.square().T
+            index = (matches_data.v, matches_data.u)
+            J_numerator.index_put_(index, ((matches_data.I - backscatter) * absorption).T, accumulate=True)
+            J_denominator.index_put_(index, absorption.square().T, accumulate=True)
             self.J = J_numerator / J_denominator
 
-    def forward(self, u: Tensor, v: Tensor, cP: Tensor) -> Tensor:
-        l, z = self.compute_l_z(cP)
+    def forward(self, u: Tensor, v: Tensor, l: float | Tensor, z: Tensor) -> Tensor:
         I_hat = l * (self.J[v, u].T * torch.exp(-self.beta * z) + self.B * (1 - torch.exp(-self.gamma * z)))
         return I_hat
 
@@ -108,8 +106,9 @@ class SUCRe(torch.nn.Module):
         u, v, cP = self.image.unproject_depth_map(
             self.image.get_depth_map().to(self.B.device), to_world=False
         )
+        l, z = self.compute_l_z(cP)
         I_reconstructed = torch.zeros((self.image.camera.height, self.image.camera.width, 3), device=cP.device)
-        I_reconstructed[v, u] = self(u=u, v=v, cP=cP).clip(0, 1).T
+        I_reconstructed[v, u] = self(u=u, v=v, l=l, z=z).clip(0, 1).T
         return Image.fromarray(np.uint8(I_reconstructed.cpu().numpy() * 255))
 
     def save_plots(self, save_dir: Path, iteration: int = None):
@@ -126,34 +125,33 @@ def adam(
         matches_data: loader.MatchesData,
         lr: float = 0.05,
         num_iter: int = 200,
-        batch_size: int = 1,
         save_dir: Path = None,
-        save_interval: int = None,
-        device: str = 'cpu'
+        save_interval: int = None
 ) -> SUCRe:
     print(f'Solve least squares with Adam optimizer ({num_iter} iterations).')
     n_obs = len(matches_data)
     optimizer = torch.optim.Adam(sucre.parameters(), lr=lr)
 
     for iteration in tqdm(range(num_iter)):
-        cost = 0
         optimizer.zero_grad()
-        sucre.update_J(matches_data=matches_data)
+        l, z = sucre.compute_l_z(matches_data.cP)
+        sucre.update_J(matches_data=matches_data, l=l, z=z)
 
-        for u, v, cP, I in matches_data.iter(batch_size=batch_size, device=device):
-            loss = torch.square(I - sucre(u=u, v=v, cP=cP)).sum()
-            (loss / n_obs / 3).backward()
-            cost += loss.item()
-
+        I_hat = sucre(u=matches_data.u, v=matches_data.v, l=l, z=z)
+        loss = torch.square(matches_data.I - I_hat).sum()
+        (loss / n_obs / 3).backward()
         optimizer.step()
+
         with np.printoptions(precision=4):
-            tqdm.write(f'iter: {iteration:04d}, cost: {cost:.4e}, B: {sucre.B.detach().cpu().flatten().numpy()}, '
+            tqdm.write(f'iter: {iteration:04d}, cost: {loss.item():.4e}, '
+                       f'B: {sucre.B.detach().cpu().flatten().numpy()}, '
                        f'beta: {sucre.beta.detach().cpu().flatten().numpy()}, '
                        f'gamma: {sucre.gamma.detach().cpu().flatten().numpy()}')
         if save_dir is not None and save_interval is not None and iteration % save_interval == 0:
             sucre.save_plots(save_dir=save_dir, iteration=iteration)
 
-    sucre.update_J(matches_data=matches_data)
+    l, z = sucre.compute_l_z(matches_data.cP)
+    sucre.update_J(matches_data=matches_data, l=l, z=z)
     return sucre
 
 
@@ -167,7 +165,6 @@ def restore_image(
         image_list: list[sfm.Image] = None,
         lr: float = 0.05,
         num_iter: int = 200,
-        batch_size: int = 1,
         save_interval: int = None,
         params_path: Path = None,
         force_compute_matches: bool = False,
@@ -198,7 +195,7 @@ def restore_image(
     matches_file.check_integrity()
 
     print('Load matches.')
-    matches_data = matches_file.load_matches(pin_memory=False if device == 'cpu' else True)
+    matches_data = matches_file.load_matches(device=device)
     print(f'Total of {len(matches_data)} observations.')
 
     sucre = SUCRe(image=image, light_model=light_model, use_closed_form=use_closed_form).to(device)
@@ -206,8 +203,8 @@ def restore_image(
     if params_path is not None:
         sucre.load_state_dict(torch.load(params_path), strict=False)
 
-    adam(sucre=sucre, matches_data=matches_data, lr=lr, num_iter=num_iter, batch_size=batch_size,
-         save_dir=output_dir, save_interval=save_interval, device=device)
+    adam(sucre=sucre, matches_data=matches_data, lr=lr, num_iter=num_iter,
+         save_dir=output_dir, save_interval=save_interval)
 
     sucre.save_plots(save_dir=output_dir)
     torch.save({
@@ -251,7 +248,6 @@ def parse_args(args: argparse.Namespace):
             image_list=image_list,
             lr=args.learning_rate,
             num_iter=args.num_iter,
-            batch_size=args.batch_size,
             save_interval=args.save_interval,
             params_path=args.params_path,
             force_compute_matches=args.force_compute_matches,
@@ -289,8 +285,6 @@ if __name__ == '__main__':
     parser.add_argument('--learning-rate', type=float, default=0.05,
                         help='learning rate for Adam optimizer.')
     parser.add_argument('--num-iter', type=int, default=200, help='number of optimization steps.')
-    parser.add_argument('--batch-size', type=int, default=5,
-                        help='batch size for adam optimization, higher is faster but requires more memory.')
     parser.add_argument('--save-interval', type=int,
                         help='save restored image every given optimization step.')
     parser.add_argument('--params-path', type=Path,

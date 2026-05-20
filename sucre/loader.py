@@ -17,40 +17,29 @@
 
 from __future__ import annotations
 
-from collections import namedtuple
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 import h5py
 import numpy as np
 import torch
-import tqdm
+from tqdm import tqdm
 from torch import Tensor
 from torch.utils.data import Dataset, DataLoader
 
 import sfm
 
-MatchesSample = namedtuple('MatchesSample', ['u', 'v', 'cP', 'I'])
 
-
+@dataclass
 class MatchesData:
-    def __init__(self):
-        self.data: list[MatchesSample] = []
+    u: Tensor
+    v: Tensor
+    cP: Tensor
+    I: Tensor
 
-    def append(self, u: Tensor, v: Tensor, cP: Tensor, I: Tensor):
-        self.data.append(MatchesSample(u=u, v=v, cP=cP, I=I))
-
-    def iter(self, batch_size: int = 1, device: str = 'cpu') -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        for i in range(0, len(self.data), batch_size):
-            yield (
-                torch.hstack([sample.u.to(device) for sample in self.data[i:i + batch_size]]).long(),
-                torch.hstack([sample.v.to(device) for sample in self.data[i:i + batch_size]]).long(),
-                torch.hstack([sample.cP.to(device) for sample in self.data[i:i + batch_size]]),
-                torch.hstack([sample.I.to(device) for sample in self.data[i:i + batch_size]])
-            )
-
-    def __len__(self):
-        return sum([sample.u.shape[0] for sample in self.data])
+    def __len__(self) -> int:
+        return self.u.shape[0]
 
 
 class MatchesFile:
@@ -78,7 +67,7 @@ class MatchesFile:
     def prepare_matches(self, num_workers: int = 0):
         image_list = self.get_image_list()
         with h5py.File(self.path, 'r+', libver='latest') as f:
-            for image_idx, image_rgb in tqdm.tqdm(
+            for image_idx, image_rgb in tqdm(
                     load_image_list(image_list, return_depth_map=False, num_workers=num_workers)):
                 image = image_list[image_idx]
                 group = f[image.name]
@@ -100,22 +89,24 @@ class MatchesFile:
                         assert np.all(dataset_data > 0), \
                             f'In {self.path}, dataset {dataset.name} contains null of negative depth(s).'
 
-    def load_matches(self, pin_memory: bool = False) -> MatchesData:
-        matches_data = MatchesData()
+    def load_matches(self, device: str = 'cpu') -> MatchesData:
+        u1, v1, cP, I = [], [], [], []
         with h5py.File(self.path, 'r', libver='latest') as f:
             for group_name, group in f.items():
                 image = self.colmap_model[group_name]
-                u1 = torch.tensor(group['u1'][()])
-                v1 = torch.tensor(group['v1'][()])
+                u1.append(torch.tensor(group['u1'][()]))
+                v1.append(torch.tensor(group['v1'][()]))
                 u2 = torch.tensor(group['u2'][()])
                 v2 = torch.tensor(group['v2'][()])
                 d = torch.tensor(group['d'][()])
-                cP = image.unproject_depth(u=u2, v=v2, d=d)
-                I = torch.tensor(group['I'][()])
-                if pin_memory:
-                    u1, v1, cP, I = u1.pin_memory(), v1.pin_memory(), cP.pin_memory(), I.pin_memory()
-                matches_data.append(u=u1, v=v1, cP=cP, I=I)
-        return matches_data
+                cP.append(image.unproject_depth(u=u2, v=v2, d=d))
+                I.append(torch.tensor(group['I'][()]))
+        return MatchesData(
+            u=torch.hstack(u1).long().to(device),
+            v=torch.hstack(v1).long().to(device),
+            cP=torch.hstack(cP).to(device),
+            I=torch.hstack(I).to(device)
+        )
 
     def __len__(self) -> int:
         size = 0
