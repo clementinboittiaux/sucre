@@ -70,9 +70,9 @@ class SUCRe(torch.nn.Module):
             backscatter = l * self.B * (1 - torch.exp(-self.gamma * z))
             J_numerator = torch.zeros((self.image.camera.height, self.image.camera.width, 3), device=self.B.device)
             J_denominator = torch.zeros((self.image.camera.height, self.image.camera.width, 3), device=self.B.device)
-            index = (matches_data.v, matches_data.u)
-            J_numerator.index_put_(index, ((matches_data.I - backscatter) * absorption).T, accumulate=True)
-            J_denominator.index_put_(index, absorption.square().T, accumulate=True)
+            J_index = (matches_data.v, matches_data.u)
+            J_numerator.index_put_(J_index, ((matches_data.I - backscatter) * absorption).T, accumulate=True)
+            J_denominator.index_put_(J_index, absorption.square().T, accumulate=True)
             self.J = J_numerator / J_denominator
 
     def forward(self, u: Tensor, v: Tensor, l: float | Tensor, z: Tensor) -> Tensor:
