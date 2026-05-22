@@ -58,7 +58,6 @@ class SUCRe(torch.nn.Module):
             lp = lP[:2] / lP[2]
             lp = lp.T.unsqueeze(dim=2)
             l = torch.exp(-torch.flatten(lp.transpose(1, 2) @ Sigma.inverse() @ lp) / 2)
-            z += lP.norm(dim=0)
         else:
             l = 1.0
         return l, z
@@ -125,6 +124,7 @@ def adam(
         matches_data: loader.MatchesData,
         lr: float = 0.05,
         num_iter: int = 200,
+        light_regularizer: float = 1e-4,
         save_dir: Path = None,
         save_interval: int = None
 ) -> SUCRe:
@@ -140,6 +140,11 @@ def adam(
         I_hat = sucre(u=matches_data.u, v=matches_data.v, l=l, z=z)
         loss = torch.square(matches_data.I - I_hat).sum()
         (loss / n_obs / 3).backward()
+
+        if sucre.light_model and light_regularizer > 0:
+            t_z = se3.exp(sucre.cam2light)[1][2, 0]
+            (light_regularizer * t_z.square()).backward()
+
         optimizer.step()
 
         with np.printoptions(precision=4):
@@ -165,6 +170,7 @@ def restore_image(
         image_list: list[sfm.Image] = None,
         lr: float = 0.05,
         num_iter: int = 200,
+        light_regularizer: float = 1e-4,
         save_interval: int = None,
         params_path: Path = None,
         force_compute_matches: bool = False,
@@ -204,7 +210,7 @@ def restore_image(
         sucre.load_state_dict(torch.load(params_path), strict=False)
 
     adam(sucre=sucre, matches_data=matches_data, lr=lr, num_iter=num_iter,
-         save_dir=output_dir, save_interval=save_interval)
+         light_regularizer=light_regularizer, save_dir=output_dir, save_interval=save_interval)
 
     sucre.save_plots(save_dir=output_dir)
     torch.save({
@@ -248,6 +254,7 @@ def parse_args(args: argparse.Namespace):
             image_list=image_list,
             lr=args.learning_rate,
             num_iter=args.num_iter,
+            light_regularizer=args.light_regularizer,
             save_interval=args.save_interval,
             params_path=args.params_path,
             force_compute_matches=args.force_compute_matches,
@@ -275,6 +282,8 @@ if __name__ == '__main__':
     parser.add_argument('--use-closed-form', action='store_true',
                         help='use the partial closed-form solution for computing the restored image from '
                              'absorption, backscatter and light parameters.')
+    parser.add_argument('--light-regularizer', type=float, default=1e-4,
+                        help='weight fixing light model gauge freedom (tz vs covariance scale).')
     parser.add_argument('--min-cover', type=float, default=0.000001,
                         help='minimum percentile of shared observations to keep the pairs of an image.')
     parser.add_argument('--image-scale', type=float, default=1.0,
