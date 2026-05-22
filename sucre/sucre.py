@@ -38,9 +38,9 @@ class SUCRe(torch.nn.Module):
         self.image = image
         self.light_model = light_model
         self.use_closed_form = use_closed_form
-        self.B = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]]))
-        self.beta = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]]))
-        self.gamma = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]]))
+        self.B = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]]).log())
+        self.beta = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]]).log())
+        self.gamma = torch.nn.Parameter(torch.tensor([[0.1], [0.1], [0.1]]).log())
         if light_model:
             self.cam2light = torch.nn.Parameter(torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
             self.sigma = torch.nn.Parameter(torch.eye(2))
@@ -65,8 +65,8 @@ class SUCRe(torch.nn.Module):
     @torch.no_grad()
     def update_J(self, matches_data: loader.MatchesData, l: float | Tensor, z: Tensor, force_update: bool = False):
         if self.use_closed_form or force_update:
-            absorption = l * torch.exp(-self.beta * z)
-            backscatter = l * self.B * (1 - torch.exp(-self.gamma * z))
+            absorption = l * torch.exp(-self.beta.exp() * z)
+            backscatter = l * self.B.exp() * (1 - torch.exp(-self.gamma.exp() * z))
             J_numerator = torch.zeros((self.image.camera.height, self.image.camera.width, 3), device=self.B.device)
             J_denominator = torch.zeros((self.image.camera.height, self.image.camera.width, 3), device=self.B.device)
             J_index = (matches_data.v, matches_data.u)
@@ -75,7 +75,7 @@ class SUCRe(torch.nn.Module):
             self.J = J_numerator / J_denominator
 
     def forward(self, u: Tensor, v: Tensor, l: float | Tensor, z: Tensor) -> Tensor:
-        I_hat = l * (self.J[v, u].T * torch.exp(-self.beta * z) + self.B * (1 - torch.exp(-self.gamma * z)))
+        I_hat = l * (self.J[v, u].T * torch.exp(-self.beta.exp() * z) + self.B.exp() * (1 - torch.exp(-self.gamma.exp() * z)))
         return I_hat
 
     @torch.no_grad()
@@ -149,9 +149,9 @@ def adam(
 
         with np.printoptions(precision=4):
             tqdm.write(f'iter: {iteration:04d}, cost: {loss.item():.4e}, '
-                       f'B: {sucre.B.detach().cpu().flatten().numpy()}, '
-                       f'beta: {sucre.beta.detach().cpu().flatten().numpy()}, '
-                       f'gamma: {sucre.gamma.detach().cpu().flatten().numpy()}')
+                       f'B: {sucre.B.detach().exp().cpu().flatten().numpy()}, '
+                       f'beta: {sucre.beta.detach().exp().cpu().flatten().numpy()}, '
+                       f'gamma: {sucre.gamma.detach().exp().cpu().flatten().numpy()}')
         if save_dir is not None and save_interval is not None and iteration % save_interval == 0:
             sucre.save_plots(save_dir=save_dir, iteration=iteration)
 
