@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from tqdm import tqdm
 from pathlib import Path
 
@@ -30,6 +31,10 @@ from torch import Tensor
 import loader
 import se3
 import sfm
+
+# Background fill (0-1 grayscale) for image pixels that carry no information from the
+# target image, used by the saved reconstruction / illumination / point-cloud images.
+BACKGROUND_GRAY = 0.8
 
 
 class SUCRe(torch.nn.Module):
@@ -86,29 +91,91 @@ class SUCRe(torch.nn.Module):
         J_valid = np.clip(J_valid, np.percentile(J_valid, 1, axis=0), np.percentile(J_valid, 99, axis=0))
         J_valid = J_valid - np.min(J_valid, axis=0)
         J_valid = J_valid / np.max(J_valid, axis=0)
-        J[~valid] = 0.0
+        J[~valid] = BACKGROUND_GRAY
         J[valid] = J_valid
         return Image.fromarray(np.uint8(J * 255))
 
     @torch.no_grad()
-    def plot_l(self):
-        u, v, cP = self.image.unproject_depth_map(
-            self.image.get_depth_map().to(self.cam2light.device), to_world=False
-        )
-        l, _ = self.compute_l_z(cP)
-        l_map = torch.zeros((self.image.camera.height, self.image.camera.width), device=l.device)
-        l_map[v, u] = l
-        return Image.fromarray(np.uint8(plt.colormaps['jet'](l_map.cpu().numpy())[:, :, :3] * 255))
+    def _view_samples(self, image: sfm.Image, depth_map: Tensor):
+        """Per-pixel data for rendering `image`: pixel coords (u, v), light l, path length z,
+        restored radiance J, and a valid mask.
+
+        J is sampled from the target's restored radiance (read directly for the target image,
+        reprojected for any other image) and is NaN wherever the point carries no information
+        from the target image; `valid` is the corresponding ~isnan(J) mask.
+        """
+        u, v, cP = image.unproject_depth_map(depth_map.to(self.B.device), to_world=False)
+        l, z = self.compute_l_z(cP)
+        if image is self.image:
+            J = self.J[v, u]
+        else:
+            uj, vj = self.image.project_to_view(image.pose.transform(cP)).long()
+            inside = (uj >= 0) & (uj < self.image.camera.width) & (vj >= 0) & (vj < self.image.camera.height)
+            J = self.J[vj.clamp(0, self.image.camera.height - 1), uj.clamp(0, self.image.camera.width - 1)]
+            J[~inside] = torch.nan
+        valid = ~torch.isnan(J).any(dim=1)
+        return u, v, l, z, J, valid
+
+    @torch.no_grad()
+    def plot_l(self, image: sfm.Image = None, depth_map: Tensor = None):
+        """Render the projected illumination pattern as seen from `image`.
+
+        Like the reconstructed image, pixels that carry no information from the target
+        image are filled with the gray background; the jet colormap is applied only to
+        the valid pixels.
+        """
+        if image is None:
+            image = self.image
+        if depth_map is None:
+            depth_map = image.get_depth_map()
+        u, v, l, z, J, valid = self._view_samples(image, depth_map)
+        l_map = torch.zeros((image.camera.height, image.camera.width), device=self.B.device)
+        l_map[v[valid], u[valid]] = l if isinstance(l, float) else l[valid]
+        rgb = plt.colormaps['jet'](l_map.cpu().numpy())[:, :, :3]
+        mask = torch.zeros((image.camera.height, image.camera.width), dtype=torch.bool, device=self.B.device)
+        mask[v[valid], u[valid]] = True
+        rgb[~mask.cpu().numpy()] = BACKGROUND_GRAY  # gray where no information from the target
+        return Image.fromarray(np.uint8(rgb * 255))
+
+    @torch.no_grad()
+    def plot_light_pattern(self, scale: float = 1.0):
+        """Render the light's illumination pattern in the light image plane.
+
+        The pattern is the 2D Gaussian l(lp) = exp(-lp^T Sigma^-1 lp / 2), sampled over the
+        target camera's field of view (its normalized image coordinates).
+        """
+        K = self.image.camera.K.to(self.sigma.device)
+        width = round(self.image.camera.width * scale)
+        height = round(self.image.camera.height * scale)
+        u = (torch.arange(width, device=self.sigma.device) + 0.5) * (self.image.camera.width / width)
+        v = (torch.arange(height, device=self.sigma.device) + 0.5) * (self.image.camera.height / height)
+        gy, gx = torch.meshgrid((v - K[1, 2]) / K[1, 1], (u - K[0, 2]) / K[0, 0], indexing='ij')
+        lp = torch.stack([gx.flatten(), gy.flatten()])
+        Sigma = self.sigma.T @ self.sigma
+        l = torch.exp(-(lp * (Sigma.inverse() @ lp)).sum(dim=0) / 2).reshape(height, width)
+        return Image.fromarray(np.uint8(plt.colormaps['jet'](l.cpu().numpy())[:, :, :3] * 255))
+
+    @torch.no_grad()
+    def reconstruct_view(self, image: sfm.Image, depth_map: Tensor = None):
+        """Render the predicted underwater image (I_hat) as seen from `image`.
+
+        For the target image, the restored radiance J is read directly. For any other image,
+        J is sampled by reprojecting the depth-map points of `image` into the target image.
+        """
+        if depth_map is None:
+            depth_map = image.get_depth_map()
+        u, v, l, z, J, valid = self._view_samples(image, depth_map)
+        l = l if isinstance(l, float) else l[valid]
+        z = z[valid]
+        I_hat = l * (J[valid].T * torch.exp(-self.beta.exp() * z) + self.B.exp() * (1 - torch.exp(-self.gamma.exp() * z)))
+        I_reconstructed = torch.full((image.camera.height, image.camera.width, 3), BACKGROUND_GRAY,
+                                     device=self.B.device)
+        I_reconstructed[v[valid], u[valid]] = I_hat.clip(0, 1).T
+        return Image.fromarray(np.uint8(I_reconstructed.cpu().numpy() * 255))
 
     @torch.no_grad()
     def plot_reconstruction(self):
-        u, v, cP = self.image.unproject_depth_map(
-            self.image.get_depth_map().to(self.B.device), to_world=False
-        )
-        l, z = self.compute_l_z(cP)
-        I_reconstructed = torch.zeros((self.image.camera.height, self.image.camera.width, 3), device=cP.device)
-        I_reconstructed[v, u] = self(u=u, v=v, l=l, z=z).clip(0, 1).T
-        return Image.fromarray(np.uint8(I_reconstructed.cpu().numpy() * 255))
+        return self.reconstruct_view(self.image)
 
     def save_plots(self, save_dir: Path, iteration: int = None):
         save_path = (save_dir / self.image.name).with_suffix('.png')
@@ -118,6 +185,69 @@ class SUCRe(torch.nn.Module):
         if self.light_model:
             self.plot_l().save(save_path.with_stem(f'{save_path.stem}_vignetting{suffix}'))
 
+    @torch.no_grad()
+    def save_all_views(self, save_dir: Path, image_list: list[sfm.Image], iteration: int):
+        """Save the reconstructed image and illumination pattern from every viewpoint in `image_list`.
+
+        Files are saved as JPEG (quality 95, gray where there is no information) under
+        `save_dir/<target_stem>_views/<view_stem>/` at the loaded image resolution.
+        """
+        views_dir = save_dir / f'{Path(self.image.name).stem}_views'
+        for image in tqdm(image_list, desc=f'Save views {iteration:04d}', leave=False):
+            view_dir = views_dir / Path(image.name).stem
+            view_dir.mkdir(parents=True, exist_ok=True)
+            depth_map = image.get_depth_map()
+            plots = {'reconstruction': self.reconstruct_view(image, depth_map)}
+            if self.light_model:
+                plots['vignetting'] = self.plot_l(image, depth_map)
+            for name, plot in plots.items():
+                plot.save(view_dir / f'{name}_{iteration:04d}.jpg', quality=95)
+
+    @torch.no_grad()
+    def light_pose(self) -> Tensor:
+        """Return the 4x4 light-to-camera transform (computer-vision convention)."""
+        R, t = se3.exp(self.cam2light)
+        pose = torch.eye(4)
+        pose[:3, :3] = R.T.cpu()
+        pose[:3, 3] = (-R.T @ t).flatten().cpu()
+        return pose
+
+    @torch.no_grad()
+    def save_light(self, save_dir: Path, iteration: int):
+        """Save the light's illumination pattern image for one optimization step."""
+        light_dir = save_dir / f'{Path(self.image.name).stem}_light'
+        light_dir.mkdir(parents=True, exist_ok=True)
+        self.plot_light_pattern().save(light_dir / f'pattern_{iteration:04d}.jpg', quality=95)
+
+    @torch.no_grad()
+    def save_point_cloud_geometry(self, save_dir: Path):
+        """Write the fixed point-cloud geometry once.
+
+        Each target pixel with positive depth is unprojected to a 3D world point; the (u, v)
+        texture coordinate into the restored RGB image is stored alongside it. Positions do
+        not change across optimization steps (only the restored RGB color does), so this is
+        written a single time and Blender animates only the color.
+        """
+        pc_dir = save_dir / f'{Path(self.image.name).stem}_pointcloud'
+        pc_dir.mkdir(parents=True, exist_ok=True)
+        depth_map = self.image.get_depth_map().to(self.B.device)
+        u, v, wP = self.image.unproject_depth_map(depth_map, to_world=True)
+        width, height = self.image.camera.width, self.image.camera.height
+        xyz = wP.T.cpu().numpy()
+        uv = torch.stack([(u + 0.5) / width, 1.0 - (v + 0.5) / height], dim=1).cpu().numpy()
+        np.savez(pc_dir / 'geometry.npz', xyz=xyz, uv=uv)
+
+    @torch.no_grad()
+    def save_point_cloud(self, save_dir: Path, iteration: int):
+        """Save the restored RGB image for one optimization step.
+
+        This is the per-step color of the unprojected point cloud; its geometry is written
+        once by :meth:`save_point_cloud_geometry`.
+        """
+        pc_dir = save_dir / f'{Path(self.image.name).stem}_pointcloud'
+        pc_dir.mkdir(parents=True, exist_ok=True)
+        self.plot_J().save(pc_dir / f'rgb_{iteration:04d}.jpg', quality=95)
+
 
 def adam(
         sucre: SUCRe,
@@ -126,11 +256,20 @@ def adam(
         num_iter: int = 200,
         light_regularizer: float = 1e-4,
         save_dir: Path = None,
-        save_interval: int = None
+        save_interval: int = None,
+        save_views: bool = False,
+        save_light: bool = False,
+        save_point_cloud: bool = False,
+        view_image_list: list[sfm.Image] = None,
 ) -> SUCRe:
     print(f'Solve least squares with Adam optimizer ({num_iter} iterations).')
     n_obs = len(matches_data)
     optimizer = torch.optim.Adam(sucre.parameters(), lr=lr)
+    export_light = (save_views or save_light) and sucre.light_model
+    light_poses = {}
+
+    if save_dir is not None and save_point_cloud:
+        sucre.save_point_cloud_geometry(save_dir=save_dir)
 
     for iteration in tqdm(range(num_iter)):
         optimizer.zero_grad()
@@ -151,13 +290,51 @@ def adam(
             tqdm.write(f'iter: {iteration:04d}, cost: {loss.item():.4e}, '
                        f'B: {sucre.B.detach().exp().cpu().flatten().numpy()}, '
                        f'beta: {sucre.beta.detach().exp().cpu().flatten().numpy()}, '
-                       f'gamma: {sucre.gamma.detach().exp().cpu().flatten().numpy()}')
+                       f'gamma: {sucre.gamma.detach().exp().cpu().flatten().numpy()}, '
+                       f't: {se3.exp(sucre.cam2light.detach())[1][:, 0].cpu().flatten().numpy()}')
         if save_dir is not None and save_interval is not None and iteration % save_interval == 0:
             sucre.save_plots(save_dir=save_dir, iteration=iteration)
+            if save_views:
+                sucre.save_all_views(save_dir=save_dir, image_list=view_image_list, iteration=iteration)
+            if export_light:
+                sucre.save_light(save_dir=save_dir, iteration=iteration)
+                light_poses[iteration] = sucre.light_pose().tolist()
+            if save_point_cloud:
+                sucre.save_point_cloud(save_dir=save_dir, iteration=iteration)
 
     l, z = sucre.compute_l_z(matches_data.cP)
     sucre.update_J(matches_data=matches_data, l=l, z=z)
+    if save_dir is not None and save_views:
+        sucre.save_all_views(save_dir=save_dir, image_list=view_image_list, iteration=num_iter)
+    if save_dir is not None and save_point_cloud:
+        sucre.save_point_cloud(save_dir=save_dir, iteration=num_iter)
+    if save_dir is not None and export_light:
+        sucre.save_light(save_dir=save_dir, iteration=num_iter)
+        light_poses[num_iter] = sucre.light_pose().tolist()
+        light_dir = save_dir / f'{Path(sucre.image.name).stem}_light'
+        (light_dir / 'poses.json').write_text(json.dumps({'light_to_camera': light_poses}, indent=1))
     return sucre
+
+
+def farthest_point_sample(images: list[sfm.Image], target: sfm.Image, count: int) -> list[sfm.Image]:
+    """Pick `count` images whose camera centers are spatially well distributed.
+
+    Greedy farthest-point sampling seeded with the target image: each step adds the image
+    whose camera center is farthest from the closest already-selected one. The target is
+    always kept. `count <= 0` or `count >= len(images)` keeps every image.
+    """
+    if count <= 0 or count >= len(images):
+        return images
+    center = {im.name: im.pose.t.flatten() for im in images}
+    center.setdefault(target.name, target.pose.t.flatten())
+    selected = [target]
+    remaining = [im for im in images if im.name != target.name]
+    while len(selected) < count and remaining:
+        farthest = max(remaining, key=lambda im: min(
+            (center[im.name] - center[s.name]).norm().item() for s in selected))
+        selected.append(farthest)
+        remaining.remove(farthest)
+    return selected
 
 
 def restore_image(
@@ -172,6 +349,11 @@ def restore_image(
         num_iter: int = 200,
         light_regularizer: float = 1e-4,
         save_interval: int = None,
+        save_views: bool = False,
+        save_light: bool = False,
+        save_point_cloud: bool = False,
+        num_views: int = 0,
+        min_sample_cover: float = 0.0,
         params_path: Path = None,
         force_compute_matches: bool = False,
         keep_matches: bool = False,
@@ -209,8 +391,18 @@ def restore_image(
     if params_path is not None:
         sucre.load_state_dict(torch.load(params_path), strict=False)
 
+    view_image_list = matches_file.get_image_list() if save_views else None
+    if view_image_list is not None and num_views > 0:
+        covers = matches_file.get_covers(image)
+        candidates = [im for im in view_image_list
+                      if covers.get(im.name, 0.0) >= min_sample_cover or im.name == image.name]
+        view_image_list = farthest_point_sample(candidates, image, num_views)
+        print(f'Saving {len(view_image_list)} spatially-distributed views '
+              f'(sampled from {len(candidates)} view(s) with cover >= {min_sample_cover}).')
     adam(sucre=sucre, matches_data=matches_data, lr=lr, num_iter=num_iter,
-         light_regularizer=light_regularizer, save_dir=output_dir, save_interval=save_interval)
+         light_regularizer=light_regularizer, save_dir=output_dir, save_interval=save_interval,
+         save_views=save_views, save_light=save_light, save_point_cloud=save_point_cloud,
+         view_image_list=view_image_list)
 
     sucre.save_plots(save_dir=output_dir)
     torch.save({
@@ -256,6 +448,11 @@ def parse_args(args: argparse.Namespace):
             num_iter=args.num_iter,
             light_regularizer=args.light_regularizer,
             save_interval=args.save_interval,
+            save_views=args.save_all_views,
+            save_light=args.save_light,
+            save_point_cloud=args.save_point_cloud,
+            num_views=args.num_views,
+            min_sample_cover=args.min_sample_cover,
             params_path=args.params_path,
             force_compute_matches=args.force_compute_matches,
             keep_matches=args.keep_matches,
@@ -296,6 +493,26 @@ if __name__ == '__main__':
     parser.add_argument('--num-iter', type=int, default=200, help='number of optimization steps.')
     parser.add_argument('--save-interval', type=int,
                         help='save restored image every given optimization step.')
+    parser.add_argument('--save-all-views', action='store_true',
+                        help='at each --save-interval step (and at the end), also save the reconstructed '
+                             'image and illumination pattern rendered from every matched image viewpoint, '
+                             'as JPEG95 (used to build the 3D illustration).')
+    parser.add_argument('--num-views', type=int, default=0,
+                        help='if > 0, --save-all-views saves only this many spatially-distributed '
+                             'views (farthest-point sampled, the restored target always kept); '
+                             '0 saves every matched view.')
+    parser.add_argument('--min-sample-cover', type=float, default=0.0,
+                        help='when sampling views with --num-views, only consider views whose '
+                             'cover (fraction of the target image they match) is at least this '
+                             'value; the restored target is always kept.')
+    parser.add_argument('--save-light', action='store_true',
+                        help='at each --save-interval step, export the light pattern and pose to '
+                             '<output>/<target>_light/ (much faster than --save-all-views, which '
+                             'also implies it).')
+    parser.add_argument('--save-point-cloud', action='store_true',
+                        help='at each --save-interval step, export the restored RGB image to '
+                             '<output>/<target>_pointcloud/ together with the fixed point-cloud '
+                             'geometry (used to build the 3D point cloud in the illustration).')
     parser.add_argument('--params-path', type=Path,
                         help='load underwater image formation model parameters from .pt file.')
     parser.add_argument('--force-compute-matches', action='store_true',

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SUCRe optimization viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #ffffff; overflow: hidden;
+                font-family: system-ui, sans-serif; }
+  #app { position: relative; width: 100%; height: 100%; }
+  #ui { position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 16px;
+        background: rgba(0, 0, 0, .6); color: #eee; display: flex; align-items: center;
+        gap: 14px; font-size: 13px; box-sizing: border-box; }
+  #ui button { background: #444; color: #eee; border: 0; border-radius: 4px;
+               padding: 6px 12px; cursor: pointer; min-width: 38px; }
+  #ui button:hover { background: #555; }
+  #frame { flex: 1; }
+  #phase { min-width: 220px; text-align: right; font-variant-numeric: tabular-nums; }
+  #view-toggle { position: absolute; top: 16px; right: 16px; background: rgba(0, 0, 0, .6);
+                 color: #eee; border: 0; border-radius: 4px; padding: 8px 14px; cursor: pointer;
+                 font-size: 13px; font-family: inherit; }
+  #view-toggle:hover { background: rgba(0, 0, 0, .8); }
+  #status { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #555; font-size: 14px; text-align: center; min-width: 260px; }
+  #loading-msg { font-variant-numeric: tabular-nums; }
+  #progress-track { width: 260px; height: 6px; background: #e5e5e5; margin: 14px auto 0;
+                    border-radius: 3px; overflow: hidden; }
+  #progress-fill { width: 0%; height: 100%; background: #5588cc; transition: width .2s linear; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="status">
+    <div id="loading-msg">Loading 0%</div>
+    <div id="progress-track"><div id="progress-fill"></div></div>
+  </div>
+  <button id="view-toggle" title="Toggle reconstruction / illumination view" hidden>Show illumination</button>
+  <div id="ui" hidden>
+    <button id="play" title="Play / pause">&#9654;</button>
+    <input id="frame" type="range" min="0" max="1" value="0" step="1">
+    <span id="phase"></span>
+  </div>
+</div>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/"
+}}
+</script>
+<script type="module" src="viewer.js"></script>
+</body>
+</html>

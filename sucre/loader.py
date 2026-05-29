@@ -54,6 +54,16 @@ class MatchesFile:
             image_list = [self.colmap_model[group_name] for group_name in f]
         return image_list
 
+    def get_covers(self, target: sfm.Image) -> dict[str, float]:
+        """Return ``{image name: cover}``, each view's match count over the target image area.
+
+        This is the same cover quantity that ``Image.match_images`` thresholds with
+        ``min_cover`` (fraction of the target image pixels that have a match).
+        """
+        denominator = target.camera.width * target.camera.height
+        with h5py.File(self.path, 'r', libver='latest') as f:
+            return {name: f[name]['u1'].shape[0] / denominator for name in f}
+
     def save_matches(self, matches: sfm.Matches, d: Tensor):
         with h5py.File(self.path, 'a', libver='latest') as f:
             group = f.create_group(matches.image2.name)
